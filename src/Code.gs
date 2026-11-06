@@ -189,7 +189,7 @@ function doPost(e) {
             replyWithMenu(event.replyToken, '❌ 抱歉，您不是系統管理員，無法查看系統狀態。');
           } else {
             const pendingCount = getPendingMessageCount(rawSheet);
-            replyWithMenu(event.replyToken, `📊 系統狀態報告：\n目前試算表中待彙整派報的訊息共有 【${pendingCount}】 筆。\n\n定時派報時程：\n• 中午 12:00\n• 下午 16:00`);
+            replyWithMenu(event.replyToken, `📊 系統狀態報告：\n目前試算表中待彙整派報的訊息共有 【${pendingCount}】 筆。\n\n💡 提示：若該時段待處理為 0 筆，系統將自動跳過、不會寄信！`);
           }
           continue;
         }
@@ -199,8 +199,13 @@ function doPost(e) {
           if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
             replyWithMenu(event.replyToken, '❌ 抱歉，您不是系統管理員，無法執行手動派報。');
           } else {
-            replyWithMenu(event.replyToken, '🚀 已收到管理員指令！系統正在立即執行半日訊息彙整與寄發 Email，完成後將自動歸檔。');
-            processAndSendDigest('管理員手動即時觸發');
+            const pendingCount = getPendingMessageCount(rawSheet);
+            if (pendingCount === 0) {
+              replyWithMenu(event.replyToken, 'ℹ️ 目前試算表中【無任何新訊息】，依系統規則本次不寄發信件。');
+            } else {
+              replyWithMenu(event.replyToken, `🚀 已收到管理員指令！偵測到有 ${pendingCount} 筆待處理訊息，系統正在執行彙整與寄發 Email...`);
+              processAndSendDigest('管理員手動即時觸發');
+            }
           }
           continue;
         }
@@ -305,17 +310,18 @@ function processAndSendDigest(timeSlotLabel) {
     }
   }
 
+  // 🛡️【無訊息防護關卡 1】：若待處理訊息為 0 筆，直接終止，絕對不寄發空白信件！
   if (pendingRows.length === 0) {
-    console.log(`[${timeSlotLabel}] 沒有待處理的新訊息。`);
+    console.log(`[${timeSlotLabel}] 該時段完全無待處理新訊息，系統略過不寄信。`);
     return;
   }
 
   // 1. 利用 Gemini API 進行「全校公告 vs 僅召集人事務」判斷與重點摘要
   const digestResult = analyzeAndSummarizeWithGemini(pendingRows);
 
-  // 若所有訊息皆為「召集人內部事項」，則本次不打擾全校老師
+  // 🛡️【無公告防護關卡 2】：若訊息經 AI 判斷全數為「召集人內部事項」，自動歸檔並終止，不打擾全校老師！
   if (!digestResult.items || digestResult.items.length === 0) {
-    console.log(`[${timeSlotLabel}] 訊息皆屬召集人專用或行政內部事項，無需公告給全體老師。`);
+    console.log(`[${timeSlotLabel}] 該時段訊息經判斷皆屬召集人內部工作，無需公告給全體老師，系統不寄信。`);
     markRowsAsProcessed(rawSheet, pendingRows, `${timeSlotLabel}_SKIPPED`);
     return;
   }
@@ -472,7 +478,6 @@ function fallbackRuleFilter(rows) {
 // ==========================
 // 7. LINE 指令選單卡片與快捷按鈕 (Quick Reply)
 // ==========================
-// 快捷點擊泡泡（顯示於輸入框上方）
 function getQuickReplyItems() {
   return {
     items: [
@@ -485,7 +490,6 @@ function getQuickReplyItems() {
   };
 }
 
-// 帶有快捷選單按鈕的文字回覆
 function replyWithMenu(replyToken, text) {
   if (!LINE_CHANNEL_ACCESS_TOKEN || !replyToken) return;
   try {
@@ -511,7 +515,6 @@ function replyWithMenu(replyToken, text) {
   }
 }
 
-// 傳送完整的指令選單文字面板
 function sendAdminMenuCard(replyToken) {
   const menuText = `🛠️【召集人通報秘書・管理員控制台】
 您好！請直接點擊下方橫向滾動的「快捷按鈕」，或輸入對應指令：
@@ -530,7 +533,8 @@ function sendAdminMenuCard(replyToken) {
 
 ⏰ 系統固定派報時程：
   • 第一梯次：每日 12:00
-  • 第二梯次：每日 16:00`;
+  • 第二梯次：每日 16:00
+  💡 規則：若該時段無新訊息，系統將自動跳過不寄信。`;
 
   replyWithMenu(replyToken, menuText);
 }
