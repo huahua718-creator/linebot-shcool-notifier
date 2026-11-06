@@ -1,0 +1,16 @@
+﻿# Environment & credentials
+.env
+*.key
+*.pem
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local log files
+*.log
