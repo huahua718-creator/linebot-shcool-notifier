@@ -12,25 +12,80 @@ const GEMINI_API_KEY = SCRIPT_PROPERTIES.getProperty('GEMINI_API_KEY');
 const DRIVE_FOLDER_ID = SCRIPT_PROPERTIES.getProperty('DRIVE_FOLDER_ID'); // 存放圖片與PDF的Drive資料夾ID
 const ADMIN_USER_ID = SCRIPT_PROPERTIES.getProperty('ADMIN_USER_ID');     // 管理員 LINE User ID (選填)
 
-// 最新免費等級推薦模型 (可依需求調整為 gemini-2.5-flash 或 gemini-1.5-flash)
-const GEMINI_MODEL = 'gemini-2.5-flash';
-
 const SHEET_RAW = 'Raw_Messages';       // 原始接收訊息表
 const SHEET_TEACHERS = 'Teacher_List';  // 教師Email通訊錄
 const SHEET_DIGEST = 'Digest_Summaries';// 彙整派報歷史記錄
 
+// 取得有效的 Gemini API Key
+function getActiveGeminiApiKey() {
+  return GEMINI_API_KEY || SCRIPT_PROPERTIES.getProperty('GEMINI_API_KEY');
+}
+
 // ==========================
-// 2. 測試專用函式 (在 Apps Script 編輯器上方選擇此函式並按「執行」)
+// 2. 動態偵測與模型候選邏輯
+// ==========================
+function getLatestFlashModelName() {
+  const defaultModel = "gemini-flash-lite-latest"; // 💡 修正預設值為目前有效的模型
+  const apiKey = getActiveGeminiApiKey();
+  if (!apiKey) return defaultModel;
+
+  const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+  
+  try {
+    const response = UrlFetchApp.fetch(listUrl, { "muteHttpExceptions": true });
+    const result = JSON.parse(response.getContentText());
+    
+    if (result.models && Array.isArray(result.models)) {
+      const flashModels = result.models
+        .filter(m => {
+          const name = m.name.toLowerCase();
+          const hasGen = m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent");
+          const isFlash = name.includes("flash");
+          
+          // 💡 排除 TTS(語音)、Image(生圖)、Computer-Use 等不適合純 OCR/文字辨識的模型
+          const isExcluded = name.includes("tts") || name.includes("image") || name.includes("computer-use") || name.includes("omni") || name.includes("exp");
+          return hasGen && isFlash && !isExcluded;
+        })
+        .map(m => m.name.replace("models/", ""));
+
+      if (flashModels.length > 0) {
+        // 自然排序：版號新、數字大的排在最前面
+        flashModels.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }));
+        Logger.log(`🤖 自動選擇的最佳 Flash 模型: [${flashModels[0]}]`);
+        return flashModels[0];
+      }
+    }
+  } catch (err) {
+    Logger.log("⚠️ 取得模型清單失敗，使用預設值: " + err.toString());
+  }
+
+  return defaultModel;
+}
+
+function getCandidateModels() {
+  const dynamicModel = getLatestFlashModelName();
+  return Array.from(new Set([
+    "gemini-flash-lite-latest",  // 1. 強制優先選用 Lite（速度快、省額度）
+    dynamicModel,                // 2. 動態偵測到的最新版 Flash 模型
+    "gemini-flash-latest",       // 3. Standard Flash 最新版 (高辨識率)
+    "gemini-3.6-flash",          // 4. 新世代強大模型備援
+    "gemini-2.5-flash"           // 5. 保底備援
+  ].filter(Boolean)));
+}
+
+// ==========================
+// 3. 測試專用函式 (在 Apps Script 編輯器上方選擇此函式並按「執行」)
 // ==========================
 /**
  * 🧪 測試 Gemini API 是否調用成功
  * 模擬兩則訊息：一則為全校公告、一則為僅召集人內部事項，驗證是否能正常過濾並產生結構化摘要
  */
 function testGeminiApi() {
-  console.log('🚀 開始測試 Gemini API 連線與語意解析...');
-  console.log(`📌 使用模型：${GEMINI_MODEL}`);
+  console.log('🚀 開始測試 Gemini API 連線與動態模型解析...');
+  const candidates = getCandidateModels();
+  console.log('📋 模型候選清單優先順序：', candidates);
 
-  if (!GEMINI_API_KEY) {
+  if (!getActiveGeminiApiKey()) {
     console.error('❌ 測試失敗：尚未在「專案設定 > 指令碼屬性」中設定 GEMINI_API_KEY！');
     return;
   }
@@ -64,13 +119,12 @@ function testGeminiApi() {
     })));
 
     const elapsedTime = ((new Date().getTime() - startTime) / 1000).toFixed(2);
-    console.log(`⏱️ API 回應耗時：${elapsedTime} 秒`);
+    console.log(`⏱️ API 總耗時：${elapsedTime} 秒`);
     console.log('--------------------------------------------------');
     console.log('📋 Gemini 分析結果輸出 (JSON)：');
     console.log(JSON.stringify(result, null, 2));
     console.log('--------------------------------------------------');
 
-    // 驗證是否成功辨識出公告與過濾召集人事項
     if (result && result.items && result.items.length > 0) {
       console.log('🎉 【測試大成功！】');
       console.log(`✅ 成功萃取出 ${result.items.length} 則全校性公告！`);
@@ -85,7 +139,7 @@ function testGeminiApi() {
 }
 
 // ==========================
-// 3. LINE Webhook 接收端 (doPost)
+// 4. LINE Webhook 接收端 (doPost)
 // ==========================
 function doPost(e) {
   try {
@@ -191,7 +245,7 @@ function doPost(e) {
 }
 
 // ==========================
-// 4. 定時彙整與 Email 派報 (12:00 / 16:00 觸發)
+// 5. 定時彙整與 Email 派報 (12:00 / 16:00 觸發)
 // ==========================
 function runDigest1200() {
   processAndSendDigest('中午 12:00');
@@ -301,10 +355,11 @@ function processAndSendDigest(timeSlotLabel) {
 }
 
 // ==========================
-// 5. Gemini API 智慧分類、篩選與摘要
+// 6. Gemini API 智慧分類、篩選與摘要 (支援候選模型動態遞補)
 // ==========================
 function analyzeAndSummarizeWithGemini(rows) {
-  if (!GEMINI_API_KEY) {
+  const apiKey = getActiveGeminiApiKey();
+  if (!apiKey) {
     console.warn('未偵測到 GEMINI_API_KEY，啟用簡易備援規則');
     return fallbackRuleFilter(rows);
   }
@@ -332,14 +387,14 @@ ${JSON.stringify(rows.map(r => ({ sender: r.sender, type: r.type, content: r.con
 }
 `;
 
-  // 優先嘗試設定之模型，若失敗可自動備援至 1.5-flash
-  const modelsToTry = [GEMINI_MODEL, 'gemini-1.5-flash'];
+  // 取得候選模型清單（優先 Lite -> 動態最新 -> Standard -> 3.6 -> 2.5）
+  const candidateModels = getCandidateModels();
   let lastError = null;
 
-  for (let m = 0; m < modelsToTry.length; m++) {
-    const currentModel = modelsToTry[m];
+  for (let m = 0; m < candidateModels.length; m++) {
+    const currentModel = candidateModels[m];
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${GEMINI_API_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`;
       const payload = {
         contents: [{ parts: [{ text: promptText }] }],
         generationConfig: { responseMimeType: "application/json" }
@@ -358,11 +413,12 @@ ${JSON.stringify(rows.map(r => ({ sender: r.sender, type: r.type, content: r.con
       if (responseCode !== 200) {
         console.warn(`[${currentModel}] 呼叫回傳 HTTP ${responseCode}: ${contentText}`);
         lastError = new Error(`HTTP ${responseCode}: ${contentText}`);
-        continue; // 嘗試下一個模型
+        continue; // 嘗試下一個候選模型
       }
 
       const resJson = JSON.parse(contentText);
       const candidateText = resJson.candidates[0].content.parts[0].text;
+      Logger.log(`✨ 成功使用模型 [${currentModel}] 完成語意解析`);
       return JSON.parse(candidateText);
     } catch (err) {
       lastError = err;
@@ -370,7 +426,7 @@ ${JSON.stringify(rows.map(r => ({ sender: r.sender, type: r.type, content: r.con
     }
   }
 
-  console.error('所有 Gemini 模型呼叫皆失敗，切換為備援規則: ' + (lastError ? lastError.message : ''));
+  console.error('所有候選 Gemini 模型呼叫皆失敗，切換為備援規則: ' + (lastError ? lastError.message : ''));
   return fallbackRuleFilter(rows);
 }
 
@@ -392,7 +448,7 @@ function fallbackRuleFilter(rows) {
 }
 
 // ==========================
-// 6. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
+// 7. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
 // ==========================
 function saveLineContentToDrive(messageId, fileName) {
   try {
