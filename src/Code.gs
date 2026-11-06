@@ -74,7 +74,7 @@ function getCandidateModels() {
 }
 
 // ==========================
-// 3. 測試專用函式 (在 Apps Script 編輯器上方選擇此函式並按「執行」)
+// 3. 測試專用函式 (可在 Apps Script 上方執行，或透過管理員私訊 !test 觸發)
 // ==========================
 /**
  * 🧪 測試 Gemini API 是否調用成功
@@ -86,8 +86,9 @@ function testGeminiApi() {
   console.log('📋 模型候選清單優先順序：', candidates);
 
   if (!getActiveGeminiApiKey()) {
-    console.error('❌ 測試失敗：尚未在「專案設定 > 指令碼屬性」中設定 GEMINI_API_KEY！');
-    return;
+    const errMsg = '❌ 測試失敗：尚未在「專案設定 > 指令碼屬性」中設定 GEMINI_API_KEY！';
+    console.error(errMsg);
+    return errMsg;
   }
 
   // 模擬真實群組接收到的兩則訊息
@@ -106,7 +107,6 @@ function testGeminiApi() {
     }
   ];
 
-  console.log('📝 傳送測試樣本訊息給 Gemini...');
   const startTime = new Date().getTime();
 
   try {
@@ -120,21 +120,21 @@ function testGeminiApi() {
 
     const elapsedTime = ((new Date().getTime() - startTime) / 1000).toFixed(2);
     console.log(`⏱️ API 總耗時：${elapsedTime} 秒`);
-    console.log('--------------------------------------------------');
-    console.log('📋 Gemini 分析結果輸出 (JSON)：');
-    console.log(JSON.stringify(result, null, 2));
-    console.log('--------------------------------------------------');
+    console.log('📋 Gemini 分析結果輸出 (JSON)：\n' + JSON.stringify(result, null, 2));
 
     if (result && result.items && result.items.length > 0) {
-      console.log('🎉 【測試大成功！】');
-      console.log(`✅ 成功萃取出 ${result.items.length} 則全校性公告！`);
-      console.log(`✅ 成功排除「僅限召集人內部領表」之事項！`);
-      console.log(`💡 產出之半日摘要：${result.summary}`);
+      const msg = `🎉 【Gemini 測試成功！】\n⏱️ 耗時：${elapsedTime} 秒\n✅ 成功辨識公告：${result.items[0].title}\n✅ 成功剔除召集人內部事項\n💡 摘要：${result.summary}`;
+      console.log(msg);
+      return msg;
     } else {
-      console.warn('⚠️ API 有回應，但未解析出任何需公告項目，請檢視輸出內容。');
+      const warnMsg = '⚠️ API 有回應但未成功解析出公告，請檢視記錄。';
+      console.warn(warnMsg);
+      return warnMsg;
     }
   } catch (err) {
-    console.error('❌ 測試失敗，發生例外錯誤：' + err.message);
+    const failMsg = '❌ 測試失敗，發生例外錯誤：' + err.message;
+    console.error(failMsg);
+    return failMsg;
   }
 }
 
@@ -167,37 +167,59 @@ function doPost(e) {
       const isOneOnOne = (event.source.type === 'user');
       const userId = event.source.userId;
 
-      // --- [管理功能] 1對1 私訊特殊指令處理 ---
+      // --- [管理功能] 1對1 私訊指令選單與特殊操作 ---
       if (isOneOnOne && messageType === 'text') {
         const textLower = message.text.trim().toLowerCase();
 
-        // 1. 查詢自己的 LINE User ID (方便管理者設定 ADMIN_USER_ID)
+        // 1. 查詢自己的 LINE User ID
         if (textLower === '我的id' || textLower === 'id' || textLower === '!id') {
-          replyLineMessage(event.replyToken, `您的 LINE User ID 為：\n${userId}\n\n請複製此代碼，填入 GAS 的指令碼屬性 ADMIN_USER_ID 中！`);
+          replyWithMenu(event.replyToken, `🆔 您的 LINE User ID 為：\n${userId}\n\n可將此代碼填入 GAS 的指令碼屬性 ADMIN_USER_ID 中！`);
           continue;
         }
 
-        // 2. 管理員指令：!status (查詢待處理筆數)
-        if (textLower === '!status') {
+        // 2. 指令選單 / 說明
+        if (textLower === '選單' || textLower === 'menu' || textLower === '!menu' || textLower === '說明' || textLower === '!help') {
+          sendAdminMenuCard(event.replyToken);
+          continue;
+        }
+
+        // 3. 管理員指令：!status (查詢待處理筆數)
+        if (textLower === '!status' || textLower === '查詢狀態' || textLower === '狀態') {
           if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-            replyLineMessage(event.replyToken, '❌ 抱歉，您不是系統管理員，無法執行此指令。');
+            replyWithMenu(event.replyToken, '❌ 抱歉，您不是系統管理員，無法查看系統狀態。');
           } else {
             const pendingCount = getPendingMessageCount(rawSheet);
-            replyLineMessage(event.replyToken, `📊 系統狀態報告：\n目前待彙整派報的訊息共有 ${pendingCount} 筆。`);
+            replyWithMenu(event.replyToken, `📊 系統狀態報告：\n目前試算表中待彙整派報的訊息共有 【${pendingCount}】 筆。\n\n定時派報時程：\n• 中午 12:00\n• 下午 16:00`);
           }
           continue;
         }
 
-        // 3. 管理員指令：!send (立即手動觸發一次彙整並寄信)
-        if (textLower === '!send') {
+        // 4. 管理員指令：!send (立即手動觸發一次彙整並寄信)
+        if (textLower === '!send' || textLower === '立即派報' || textLower === '手動派報') {
           if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-            replyLineMessage(event.replyToken, '❌ 抱歉，您不是系統管理員，無法執行手動派報。');
+            replyWithMenu(event.replyToken, '❌ 抱歉，您不是系統管理員，無法執行手動派報。');
           } else {
-            replyLineMessage(event.replyToken, '🚀 已收到管理員指令，正在立即執行手動彙整與寄發 Email...');
-            processAndSendDigest('手動即時觸發');
+            replyWithMenu(event.replyToken, '🚀 已收到管理員指令！系統正在立即執行半日訊息彙整與寄發 Email，完成後將自動歸檔。');
+            processAndSendDigest('管理員手動即時觸發');
           }
           continue;
         }
+
+        // 5. 管理員指令：!test (手機一鍵測試 Gemini AI)
+        if (textLower === '!test' || textLower === '測試ai' || textLower === '測試') {
+          if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
+            replyWithMenu(event.replyToken, '❌ 抱歉，您不是系統管理員，無法執行 AI 測試。');
+          } else {
+            replyWithMenu(event.replyToken, '🧪 正在連線測試 Gemini AI 模型與語意辨識中，請稍候約 1~3 秒...');
+            const testResult = testGeminiApi();
+            notifyAdmin(testResult); // 將測試結果推播給管理員
+          }
+          continue;
+        }
+
+        // 6. 其他文字預設回傳指令選單
+        sendAdminMenuCard(event.replyToken);
+        continue;
       }
 
       // --- [常態群組記錄] 接收文字、圖片與 PDF 檔案 ---
@@ -448,7 +470,73 @@ function fallbackRuleFilter(rows) {
 }
 
 // ==========================
-// 7. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
+// 7. LINE 指令選單卡片與快捷按鈕 (Quick Reply)
+// ==========================
+// 快捷點擊泡泡（顯示於輸入框上方）
+function getQuickReplyItems() {
+  return {
+    items: [
+      { type: "action", action: { type: "message", label: "📊 查詢狀態", text: "!status" } },
+      { type: "action", action: { type: "message", label: "🚀 立即派報", text: "!send" } },
+      { type: "action", action: { type: "message", label: "🧪 測試AI", text: "!test" } },
+      { type: "action", action: { type: "message", label: "🆔 我的ID", text: "!id" } },
+      { type: "action", action: { type: "message", label: "📋 指令選單", text: "!menu" } }
+    ]
+  };
+}
+
+// 帶有快捷選單按鈕的文字回覆
+function replyWithMenu(replyToken, text) {
+  if (!LINE_CHANNEL_ACCESS_TOKEN || !replyToken) return;
+  try {
+    const url = 'https://api.line.me/v2/bot/message/reply';
+    UrlFetchApp.fetch(url, {
+      method: 'post',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`
+      },
+      payload: JSON.stringify({
+        replyToken: replyToken,
+        messages: [{
+          type: 'text',
+          text: text,
+          quickReply: getQuickReplyItems()
+        }]
+      }),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    console.error('replyWithMenu 失敗: ' + e.message);
+  }
+}
+
+// 傳送完整的指令選單文字面板
+function sendAdminMenuCard(replyToken) {
+  const menuText = `🛠️【召集人通報秘書・管理員控制台】
+您好！請直接點擊下方橫向滾動的「快捷按鈕」，或輸入對應指令：
+
+📊 狀態查詢 (輸入 !status)
+  查看試算表中累積待發送的訊息筆數與排程
+
+🚀 立即派報 (輸入 !send)
+  立即執行一次半日訊息整理並發送 Email
+
+🧪 測試 AI (輸入 !test)
+  在手機上立即測試 Gemini 模型連線與摘要效果
+
+🆔 查詢我的ID (輸入 !id)
+  取得您的 33 碼 LINE User ID
+
+⏰ 系統固定派報時程：
+  • 第一梯次：每日 12:00
+  • 第二梯次：每日 16:00`;
+
+  replyWithMenu(replyToken, menuText);
+}
+
+// ==========================
+// 8. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
 // ==========================
 function saveLineContentToDrive(messageId, fileName) {
   try {
@@ -465,27 +553,6 @@ function saveLineContentToDrive(messageId, fileName) {
   }
 }
 
-function replyLineMessage(replyToken, text) {
-  if (!LINE_CHANNEL_ACCESS_TOKEN || !replyToken) return;
-  try {
-    const url = 'https://api.line.me/v2/bot/message/reply';
-    UrlFetchApp.fetch(url, {
-      method: 'post',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`
-      },
-      payload: JSON.stringify({
-        replyToken: replyToken,
-        messages: [{ type: 'text', text: text }]
-      }),
-      muteHttpExceptions: true
-    });
-  } catch (e) {
-    console.error('LINE 回覆失敗: ' + e.message);
-  }
-}
-
 function notifyAdmin(message) {
   if (!ADMIN_USER_ID || !LINE_CHANNEL_ACCESS_TOKEN) return;
   try {
@@ -498,7 +565,11 @@ function notifyAdmin(message) {
       },
       payload: JSON.stringify({
         to: ADMIN_USER_ID,
-        messages: [{ type: 'text', text: message }]
+        messages: [{
+          type: 'text',
+          text: message,
+          quickReply: getQuickReplyItems()
+        }]
       }),
       muteHttpExceptions: true
     });
