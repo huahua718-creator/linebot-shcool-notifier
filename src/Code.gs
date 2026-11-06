@@ -10,6 +10,7 @@ const SCRIPT_PROPERTIES = PropertiesService.getScriptProperties();
 const LINE_CHANNEL_ACCESS_TOKEN = SCRIPT_PROPERTIES.getProperty('LINE_CHANNEL_ACCESS_TOKEN');
 const GEMINI_API_KEY = SCRIPT_PROPERTIES.getProperty('GEMINI_API_KEY');
 const DRIVE_FOLDER_ID = SCRIPT_PROPERTIES.getProperty('DRIVE_FOLDER_ID'); // 存放圖片與PDF的Drive資料夾ID
+const ADMIN_USER_ID = SCRIPT_PROPERTIES.getProperty('ADMIN_USER_ID');     // 管理員 LINE User ID (選填)
 
 const SHEET_RAW = 'Raw_Messages';       // 原始接收訊息表
 const SHEET_TEACHERS = 'Teacher_List';  // 教師Email通訊錄
@@ -41,7 +42,43 @@ function doPost(e) {
       const senderName = getUserDisplayName(event.source);
       const messageId = message.id;
       const messageType = message.type; // text, image, file
+      const isOneOnOne = (event.source.type === 'user');
+      const userId = event.source.userId;
 
+      // --- [管理功能] 1對1 私訊特殊指令處理 ---
+      if (isOneOnOne && messageType === 'text') {
+        const textLower = message.text.trim().toLowerCase();
+
+        // 1. 查詢自己的 LINE User ID (方便管理者設定 ADMIN_USER_ID)
+        if (textLower === '我的id' || textLower === 'id' || textLower === '!id') {
+          replyLineMessage(event.replyToken, `您的 LINE User ID 為：\n${userId}\n\n請複製此代碼，填入 GAS 的指令碼屬性 ADMIN_USER_ID 中！`);
+          continue;
+        }
+
+        // 2. 管理員指令：!status (查詢待處理筆數)
+        if (textLower === '!status') {
+          if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
+            replyLineMessage(event.replyToken, '❌ 抱歉，您不是系統管理員，無法執行此指令。');
+          } else {
+            const pendingCount = getPendingMessageCount(rawSheet);
+            replyLineMessage(event.replyToken, `📊 系統狀態報告：\n目前待彙整派報的訊息共有 ${pendingCount} 筆。`);
+          }
+          continue;
+        }
+
+        // 3. 管理員指令：!send (立即手動觸發一次彙整並寄信)
+        if (textLower === '!send') {
+          if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
+            replyLineMessage(event.replyToken, '❌ 抱歉，您不是系統管理員，無法執行手動派報。');
+          } else {
+            replyLineMessage(event.replyToken, '🚀 已收到管理員指令，正在立即執行手動彙整與寄發 Email...');
+            processAndSendDigest('手動即時觸發');
+          }
+          continue;
+        }
+      }
+
+      // --- [常態群組記錄] 接收文字、圖片與 PDF 檔案 ---
       let textContent = '';
       let driveFileId = '';
       let driveFileUrl = '';
@@ -62,7 +99,7 @@ function doPost(e) {
       // 關聯同一個發布者在 2 分鐘內的訊息（Group ID）
       const sessionGroupId = generateSessionGroupId(rawSheet, senderName, timestamp);
 
-      // 寫入 Google Sheets
+      // 寫入 Google Sheets 原始訊息表
       rawSheet.appendRow([
         messageId,
         timestamp,
@@ -80,6 +117,7 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({ status: 'success' })).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
     console.error('doPost Error: ' + err.message);
+    notifyAdmin(`⚠️ LINE Webhook 發生錯誤：${err.message}`);
     return ContentService.createTextOutput(JSON.stringify({ status: 'error', message: err.message })).setMimeType(ContentService.MimeType.JSON);
   }
 }
@@ -99,6 +137,7 @@ function processAndSendDigest(timeSlotLabel) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const rawSheet = ss.getSheetByName(SHEET_RAW);
   const teacherSheet = ss.getSheetByName(SHEET_TEACHERS);
+  const digestSheet = ss.getSheetByName(SHEET_DIGEST);
   if (!rawSheet || !teacherSheet) return;
 
   const data = rawSheet.getDataRange().getValues();
@@ -161,13 +200,32 @@ function processAndSendDigest(timeSlotLabel) {
     const todayStr = Utilities.formatDate(new Date(), 'GMT+8', 'yyyy/MM/dd');
     const subject = `【竹林召集人通報】${todayStr} ${timeSlotLabel} 重點訊息整理`;
 
-    // 使用 Bcc 密件副本保障隱私，或批次寄送
-    GmailApp.sendEmail(recipients.join(','), subject, '請使用支援 HTML 的郵件客戶端開啟本通知。', {
-      htmlBody: htmlBody,
-      attachments: attachments,
-      name: '竹林召集人智慧秘書'
-    });
-    console.log(`已成功發送郵件給 ${recipients.length} 位老師。`);
+    try {
+      GmailApp.sendEmail(recipients.join(','), subject, '請使用支援 HTML 的郵件客戶端開啟本通知。', {
+        htmlBody: htmlBody,
+        attachments: attachments,
+        name: '竹林召集人智慧秘書'
+      });
+      console.log(`已成功發送郵件給 ${recipients.length} 位老師。`);
+
+      // 寫入 Digest_Summaries 歷史記錄
+      if (digestSheet) {
+        digestSheet.appendRow([
+          `DIG-${Utilities.formatDate(new Date(), 'GMT+8', 'yyyyMMdd-HHmm')}`,
+          new Date(),
+          timeSlotLabel,
+          digestResult.items.map(it => it.category).join('、'),
+          digestResult.items[0].title,
+          digestResult.summary,
+          attachments.length,
+          recipients.length,
+          'SUCCESS'
+        ]);
+      }
+    } catch (e) {
+      console.error('Gmail 寄送失敗: ' + e.message);
+      notifyAdmin(`⚠️ 寄發 Email 失敗：${e.message}`);
+    }
   }
 
   // 5. 標記訊息為已處理
@@ -179,7 +237,6 @@ function processAndSendDigest(timeSlotLabel) {
 // ==========================
 function analyzeAndSummarizeWithGemini(rows) {
   if (!GEMINI_API_KEY) {
-    // 若尚未填寫 Gemini API Key，走簡易本地關鍵字規則作為備援
     return fallbackRuleFilter(rows);
   }
 
@@ -229,7 +286,6 @@ ${JSON.stringify(rows.map(r => ({ sender: r.sender, type: r.type, content: r.con
   }
 }
 
-// 規則式備援機制（當無 API Key 時運作）
 function fallbackRuleFilter(rows) {
   const excludeKeywords = ['僅召集人', '召集人開會', '請召集人簽到', '請召集人回覆私訊'];
   const items = [];
@@ -248,7 +304,7 @@ function fallbackRuleFilter(rows) {
 }
 
 // ==========================
-// 5. 輔助函式 (Drive存檔、LINE Token、HTML產生)
+// 5. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
 // ==========================
 function saveLineContentToDrive(messageId, fileName) {
   try {
@@ -262,6 +318,48 @@ function saveLineContentToDrive(messageId, fileName) {
   } catch (e) {
     console.error('下載 LINE 內容至 Drive 失敗: ' + e.message);
     return null;
+  }
+}
+
+function replyLineMessage(replyToken, text) {
+  if (!LINE_CHANNEL_ACCESS_TOKEN || !replyToken) return;
+  try {
+    const url = 'https://api.line.me/v2/bot/message/reply';
+    UrlFetchApp.fetch(url, {
+      method: 'post',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`
+      },
+      payload: JSON.stringify({
+        replyToken: replyToken,
+        messages: [{ type: 'text', text: text }]
+      }),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    console.error('LINE 回覆失敗: ' + e.message);
+  }
+}
+
+function notifyAdmin(message) {
+  if (!ADMIN_USER_ID || !LINE_CHANNEL_ACCESS_TOKEN) return;
+  try {
+    const url = 'https://api.line.me/v2/bot/message/push';
+    UrlFetchApp.fetch(url, {
+      method: 'post',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`
+      },
+      payload: JSON.stringify({
+        to: ADMIN_USER_ID,
+        messages: [{ type: 'text', text: message }]
+      }),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    console.error('管理員警報通知失敗: ' + e.message);
   }
 }
 
@@ -291,7 +389,7 @@ function generateSessionGroupId(sheet, senderName, timestamp) {
   const diffMinutes = (timestamp - lastTime) / (1000 * 60);
 
   if (lastSender === senderName && diffMinutes <= 2) {
-    return sheet.getRange(lastRow, 8).getValue(); // 繼承上一筆的 Group ID
+    return sheet.getRange(lastRow, 8).getValue();
   }
   return Utilities.getUuid();
 }
@@ -300,8 +398,8 @@ function getTeacherEmailList(sheet) {
   const values = sheet.getDataRange().getValues();
   const emails = [];
   for (let i = 1; i < values.length; i++) {
-    const email = values[i][1]; // 假設 B 欄是 Email
-    const enabled = values[i][2]; // 假設 C 欄是 是否接收 (TRUE/FALSE)
+    const email = values[i][1];
+    const enabled = values[i][2];
     if (email && (enabled === true || enabled === 'TRUE' || enabled === '')) {
       emails.push(email.toString().trim());
     }
@@ -309,10 +407,19 @@ function getTeacherEmailList(sheet) {
   return emails;
 }
 
+function getPendingMessageCount(sheet) {
+  const data = sheet.getDataRange().getValues();
+  let count = 0;
+  for (let r = 1; r < data.length; r++) {
+    if (data[r][8] === false || data[r][8] === 'FALSE') count++;
+  }
+  return count;
+}
+
 function markRowsAsProcessed(sheet, rows, batchTag) {
   rows.forEach(r => {
-    sheet.getRange(r.rowIndex, 9).setValue(true);     // is_processed = true
-    sheet.getRange(r.rowIndex, 10).setValue(batchTag); // batch_tag
+    sheet.getRange(r.rowIndex, 9).setValue(true);
+    sheet.getRange(r.rowIndex, 10).setValue(batchTag);
   });
 }
 
