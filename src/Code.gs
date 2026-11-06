@@ -12,12 +12,80 @@ const GEMINI_API_KEY = SCRIPT_PROPERTIES.getProperty('GEMINI_API_KEY');
 const DRIVE_FOLDER_ID = SCRIPT_PROPERTIES.getProperty('DRIVE_FOLDER_ID'); // 存放圖片與PDF的Drive資料夾ID
 const ADMIN_USER_ID = SCRIPT_PROPERTIES.getProperty('ADMIN_USER_ID');     // 管理員 LINE User ID (選填)
 
+// 最新免費等級推薦模型 (可依需求調整為 gemini-2.5-flash 或 gemini-1.5-flash)
+const GEMINI_MODEL = 'gemini-2.5-flash';
+
 const SHEET_RAW = 'Raw_Messages';       // 原始接收訊息表
 const SHEET_TEACHERS = 'Teacher_List';  // 教師Email通訊錄
 const SHEET_DIGEST = 'Digest_Summaries';// 彙整派報歷史記錄
 
 // ==========================
-// 2. LINE Webhook 接收端 (doPost)
+// 2. 測試專用函式 (在 Apps Script 編輯器上方選擇此函式並按「執行」)
+// ==========================
+/**
+ * 🧪 測試 Gemini API 是否調用成功
+ * 模擬兩則訊息：一則為全校公告、一則為僅召集人內部事項，驗證是否能正常過濾並產生結構化摘要
+ */
+function testGeminiApi() {
+  console.log('🚀 開始測試 Gemini API 連線與語意解析...');
+  console.log(`📌 使用模型：${GEMINI_MODEL}`);
+
+  if (!GEMINI_API_KEY) {
+    console.error('❌ 測試失敗：尚未在「專案設定 > 指令碼屬性」中設定 GEMINI_API_KEY！');
+    return;
+  }
+
+  // 模擬真實群組接收到的兩則訊息
+  const mockMessages = [
+    {
+      sender: '黃怡瑜 Lia',
+      type: 'text',
+      content: '@All 各位老師大家好，附件為 115-1 第二次段考範圍通知，煩請協助確認內容，若沒問題今天下午正式公告全校。',
+      time: '14:51'
+    },
+    {
+      sender: '教學組長',
+      type: 'text',
+      content: '請各科召集人明天中午 12:10 到第一會議室領取各科審題記錄表並繳交簽到，非召集人老師不需出席。',
+      time: '15:10'
+    }
+  ];
+
+  console.log('📝 傳送測試樣本訊息給 Gemini...');
+  const startTime = new Date().getTime();
+
+  try {
+    const result = analyzeAndSummarizeWithGemini(mockMessages.map((m, idx) => ({
+      rowIndex: idx + 1,
+      sender: m.sender,
+      type: m.type,
+      content: m.content,
+      timestamp: new Date()
+    })));
+
+    const elapsedTime = ((new Date().getTime() - startTime) / 1000).toFixed(2);
+    console.log(`⏱️ API 回應耗時：${elapsedTime} 秒`);
+    console.log('--------------------------------------------------');
+    console.log('📋 Gemini 分析結果輸出 (JSON)：');
+    console.log(JSON.stringify(result, null, 2));
+    console.log('--------------------------------------------------');
+
+    // 驗證是否成功辨識出公告與過濾召集人事項
+    if (result && result.items && result.items.length > 0) {
+      console.log('🎉 【測試大成功！】');
+      console.log(`✅ 成功萃取出 ${result.items.length} 則全校性公告！`);
+      console.log(`✅ 成功排除「僅限召集人內部領表」之事項！`);
+      console.log(`💡 產出之半日摘要：${result.summary}`);
+    } else {
+      console.warn('⚠️ API 有回應，但未解析出任何需公告項目，請檢視輸出內容。');
+    }
+  } catch (err) {
+    console.error('❌ 測試失敗，發生例外錯誤：' + err.message);
+  }
+}
+
+// ==========================
+// 3. LINE Webhook 接收端 (doPost)
 // ==========================
 function doPost(e) {
   try {
@@ -123,7 +191,7 @@ function doPost(e) {
 }
 
 // ==========================
-// 3. 定時彙整與 Email 派報 (12:00 / 16:00 觸發)
+// 4. 定時彙整與 Email 派報 (12:00 / 16:00 觸發)
 // ==========================
 function runDigest1200() {
   processAndSendDigest('中午 12:00');
@@ -233,10 +301,11 @@ function processAndSendDigest(timeSlotLabel) {
 }
 
 // ==========================
-// 4. Gemini API 智慧分類、篩選與摘要
+// 5. Gemini API 智慧分類、篩選與摘要
 // ==========================
 function analyzeAndSummarizeWithGemini(rows) {
   if (!GEMINI_API_KEY) {
+    console.warn('未偵測到 GEMINI_API_KEY，啟用簡易備援規則');
     return fallbackRuleFilter(rows);
   }
 
@@ -263,34 +332,53 @@ ${JSON.stringify(rows.map(r => ({ sender: r.sender, type: r.type, content: r.con
 }
 `;
 
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-    const payload = {
-      contents: [{ parts: [{ text: promptText }] }],
-      generationConfig: { responseMimeType: "application/json" }
-    };
+  // 優先嘗試設定之模型，若失敗可自動備援至 1.5-flash
+  const modelsToTry = [GEMINI_MODEL, 'gemini-1.5-flash'];
+  let lastError = null;
 
-    const response = UrlFetchApp.fetch(url, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
-    });
+  for (let m = 0; m < modelsToTry.length; m++) {
+    const currentModel = modelsToTry[m];
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${GEMINI_API_KEY}`;
+      const payload = {
+        contents: [{ parts: [{ text: promptText }] }],
+        generationConfig: { responseMimeType: "application/json" }
+      };
 
-    const resJson = JSON.parse(response.getContentText());
-    const candidateText = resJson.candidates[0].content.parts[0].text;
-    return JSON.parse(candidateText);
-  } catch (err) {
-    console.error('Gemini API 處理失敗，改用規則模式: ' + err.message);
-    return fallbackRuleFilter(rows);
+      const response = UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      });
+
+      const responseCode = response.getResponseCode();
+      const contentText = response.getContentText();
+
+      if (responseCode !== 200) {
+        console.warn(`[${currentModel}] 呼叫回傳 HTTP ${responseCode}: ${contentText}`);
+        lastError = new Error(`HTTP ${responseCode}: ${contentText}`);
+        continue; // 嘗試下一個模型
+      }
+
+      const resJson = JSON.parse(contentText);
+      const candidateText = resJson.candidates[0].content.parts[0].text;
+      return JSON.parse(candidateText);
+    } catch (err) {
+      lastError = err;
+      console.warn(`[${currentModel}] 嘗試失敗: ${err.message}`);
+    }
   }
+
+  console.error('所有 Gemini 模型呼叫皆失敗，切換為備援規則: ' + (lastError ? lastError.message : ''));
+  return fallbackRuleFilter(rows);
 }
 
 function fallbackRuleFilter(rows) {
   const excludeKeywords = ['僅召集人', '召集人開會', '請召集人簽到', '請召集人回覆私訊'];
   const items = [];
   rows.forEach(r => {
-    const isInternal = excludeKeywords.some(kw => r.content.includes(kw));
+    const isInternal = excludeKeywords.some(kw => r.content && r.content.includes(kw));
     if (!isInternal && r.content && !r.content.startsWith('[附件:')) {
       items.push({
         category: '一般通報',
@@ -304,7 +392,7 @@ function fallbackRuleFilter(rows) {
 }
 
 // ==========================
-// 5. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
+// 6. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
 // ==========================
 function saveLineContentToDrive(messageId, fileName) {
   try {

@@ -118,3 +118,20 @@ linebot-school-notifier/
 3. **即時手動強制發送測試**：
    - 管理員私訊傳送：`!send`
    - 機器人會立即執行一次整理並寄送 Email，不必等待定時排程，隨時可用於測試驗證。
+
+---
+
+## 🧪 一鍵測試 Gemini API 連線與過濾效果
+
+在程式碼 `src/Code.gs` 中已內建 **`testGeminiApi()`** 測試專用函式，您可以在不需要發 LINE 訊息的情況下，直接在 Apps Script 後台驗證 Gemini 是否調用成功：
+
+### 操作步驟：
+1. 打開 Google Apps Script 編輯器。
+2. 確保「專案設定 > 指令碼屬性」已經填入 **`GEMINI_API_KEY`**。
+3. 在編輯器上方工具列的函式下拉選單中，選取 **`testGeminiApi`**。
+4. 點擊 **「執行」** 按鈕。
+5. 下方「執行記錄 (Execution Log)」將會顯示：
+   - 📌 使用的模型版本（預設：`gemini-2.5-flash`，具備 `gemini-1.5-flash` 自動備援機制）
+   - ⏱️ API 回應耗時
+   - 📋 傳回的結構化 JSON 摘要
+   - 🎉 是否成功辨識「全校公告」並自動剔除「僅召集人內部領表」之事項！
