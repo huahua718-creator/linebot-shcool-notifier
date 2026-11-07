@@ -11,6 +11,7 @@ const LINE_CHANNEL_ACCESS_TOKEN = SCRIPT_PROPERTIES.getProperty('LINE_CHANNEL_AC
 const GEMINI_API_KEY = SCRIPT_PROPERTIES.getProperty('GEMINI_API_KEY');
 const DRIVE_FOLDER_ID = SCRIPT_PROPERTIES.getProperty('DRIVE_FOLDER_ID'); // 存放圖片與PDF的Drive資料夾ID
 const ADMIN_USER_ID = SCRIPT_PROPERTIES.getProperty('ADMIN_USER_ID');     // 管理員 LINE User ID (選填)
+const TARGET_GROUP_ID = SCRIPT_PROPERTIES.getProperty('TARGET_GROUP_ID'); // 指定監聽的群組ID (選填，若設定則只收該群組)
 
 const SHEET_RAW = 'Raw_Messages';           // 原始接收訊息表
 const SHEET_TEACHERS = 'Teacher_List';      // 教師Email通訊錄
@@ -23,66 +24,86 @@ function getActiveGeminiApiKey() {
 }
 
 // ==========================
-// 2. 動態偵測與模型候選邏輯
+// 2. 測試專用函式專區 (Apps Script 編輯器上方選取直接執行)
 // ==========================
-function getLatestFlashModelName() {
-  const defaultModel = "gemini-flash-lite-latest"; // 💡 修正預設值為目前有效的模型
-  const apiKey = getActiveGeminiApiKey();
-  if (!apiKey) return defaultModel;
 
-  const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+/**
+ * 📧 【測試寄信功能】：只寄給管理員測試信件
+ * 驗證 GmailApp 寄件權限、HTML 排版與寄件配額，完全不打擾其他老師！
+ */
+function testSendEmailToAdmin() {
+  console.log('🚀 開始執行管理員寄信測試 (testSendEmailToAdmin)...');
   
-  try {
-    const response = UrlFetchApp.fetch(listUrl, { "muteHttpExceptions": true });
-    const result = JSON.parse(response.getContentText());
-    
-    if (result.models && Array.isArray(result.models)) {
-      const flashModels = result.models
-        .filter(m => {
-          const name = m.name.toLowerCase();
-          const hasGen = m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent");
-          const isFlash = name.includes("flash");
-          
-          // 💡 排除 TTS(語音)、Image(生圖)、Computer-Use 等不適合純 OCR/文字辨識的模型
-          const isExcluded = name.includes("tts") || name.includes("image") || name.includes("computer-use") || name.includes("omni") || name.includes("exp");
-          return hasGen && isFlash && !isExcluded;
-        })
-        .map(m => m.name.replace("models/", ""));
-
-      if (flashModels.length > 0) {
-        // 自然排序：版號新、數字大的排在最前面
-        flashModels.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }));
-        Logger.log(`🤖 自動選擇的最佳 Flash 模型: [${flashModels[0]}]`);
-        return flashModels[0];
-      }
-    }
-  } catch (err) {
-    Logger.log("⚠️ 取得模型清單失敗，使用預設值: " + err.toString());
+  // 1. 取得管理員 Email (優先使用當前執行者帳號，亦可在此手動指定)
+  const adminEmail = Session.getActiveUser().getEmail();
+  console.log(`📬 測試信收件者 Email：${adminEmail}`);
+  
+  if (!adminEmail) {
+    console.error('❌ 無法自動偵測管理員 Email，請直接在函式第一行填寫：const adminEmail = "your_email@gmail.com";');
+    return;
   }
 
-  return defaultModel;
+  // 2. 檢查 Gmail 每日寄件剩餘配額
+  const remainingQuota = MailApp.getRemainingDailyQuota();
+  console.log(`📊 您的 Google 帳號今日剩餘寄信額度：${remainingQuota} 封`);
+
+  // 3. 準備模擬之處室公告內容
+  const mockDigest = {
+    summary: '此為系統寄件測試信。教務處已發布段考核對提醒，學務處公告下週疫苗施打。',
+    items: [
+      {
+        department: '教務處',
+        category: '教務與段考',
+        title: '【教務處公告】115-1 第二次段考範圍通知確認',
+        official_sender: '教務處教學組 (黃怡瑜老師)',
+        points: [
+          '第二次段考各科範圍表已由教學組擬定完成',
+          '煩請各科召集人與任課老師確實檢查內容',
+          '若無疑義，今日下午將正式公告全校'
+        ]
+      },
+      {
+        department: '學務處',
+        category: '學務與活動',
+        title: '【學務處通知】下週一 (11/09) 全校流感疫苗施打時程',
+        official_sender: '學務處體衛組 (曉光老師)',
+        points: [
+          '施打當日請全校師生務必攜帶「健保卡」',
+          '各班請按表定時程於活動中心舞台前集合',
+          '遇跨兩節課之任課教師，請利用下課時間提前5分鐘交接'
+        ]
+      }
+    ]
+  };
+
+  const htmlBody = generateHtmlEmail('管理員寄件測試時段', mockDigest);
+  const todayStr = Utilities.formatDate(new Date(), 'GMT+8', 'yyyy/MM/dd HH:mm');
+  const subject = `【測試信件】竹林召集人群組 半日訊息整理 (${todayStr})`;
+
+  try {
+    GmailApp.sendEmail(adminEmail, subject, '這是一封測試郵件，請使用支援 HTML 的郵件閱讀器檢視。', {
+      htmlBody: htmlBody,
+      name: '竹林召集人智慧秘書 (測試)'
+    });
+    
+    console.log('--------------------------------------------------');
+    console.log(`🎉 【測試信發送成功！】`);
+    console.log(`✅ 郵件已成功寄至：${adminEmail}`);
+    console.log(`💡 提示：若收件匣未見信件，請務必查看「垃圾郵件 (Spam)」或「促銷內容」分頁！`);
+    console.log('--------------------------------------------------');
+  } catch (err) {
+    console.error('❌ 寄件失敗，原因：' + err.message);
+    if (err.message.includes('Limit Exceeded')) {
+      console.error('⚠️ 寄件配額已達上限，請明日再試。');
+    }
+  }
 }
 
-function getCandidateModels() {
-  const dynamicModel = getLatestFlashModelName();
-  return Array.from(new Set([
-    "gemini-flash-lite-latest",  // 1. 強制優先選用 Lite（速度快、省額度）
-    dynamicModel,                // 2. 動態偵測到的最新版 Flash 模型
-    "gemini-flash-latest",       // 3. Standard Flash 最新版 (高辨識率)
-    "gemini-3.6-flash",          // 4. 新世代強大模型備援
-    "gemini-2.5-flash"           // 5. 保底備援
-  ].filter(Boolean)));
-}
-
-// ==========================
-// 3. 測試專用函式 (可在 Apps Script 上方執行，或透過管理員私訊 !test 觸發)
-// ==========================
 /**
  * 🧪 測試 Gemini API 是否調用成功
- * 模擬兩則訊息：一則自帶身分、一則透過單位連結發文，驗證是否能正常過濾並產生單位名義之結構化摘要
  */
 function testGeminiApi() {
-  console.log('🚀 開始測試 Gemini API 連線與單位身分發文解析...');
+  console.log('🚀 開始測試 Gemini API 連線與動態模型解析...');
   const candidates = getCandidateModels();
   console.log('📋 模型候選清單優先順序：', candidates);
 
@@ -92,7 +113,6 @@ function testGeminiApi() {
     return errMsg;
   }
 
-  // 模擬真實群組接收到的兩則訊息（示範發言者未提單位，但已自動連結單位職稱）
   const mockMessages = [
     {
       sender: '教務處教學組 (黃怡瑜 Lia 老師)',
@@ -143,7 +163,56 @@ function testGeminiApi() {
 }
 
 // ==========================
-// 4. LINE Webhook 接收端 (doPost)
+// 3. 動態偵測與模型候選邏輯
+// ==========================
+function getLatestFlashModelName() {
+  const defaultModel = "gemini-flash-lite-latest";
+  const apiKey = getActiveGeminiApiKey();
+  if (!apiKey) return defaultModel;
+
+  const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+  
+  try {
+    const response = UrlFetchApp.fetch(listUrl, { "muteHttpExceptions": true });
+    const result = JSON.parse(response.getContentText());
+    
+    if (result.models && Array.isArray(result.models)) {
+      const flashModels = result.models
+        .filter(m => {
+          const name = m.name.toLowerCase();
+          const hasGen = m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent");
+          const isFlash = name.includes("flash");
+          const isExcluded = name.includes("tts") || name.includes("image") || name.includes("computer-use") || name.includes("omni") || name.includes("exp");
+          return hasGen && isFlash && !isExcluded;
+        })
+        .map(m => m.name.replace("models/", ""));
+
+      if (flashModels.length > 0) {
+        flashModels.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }));
+        Logger.log(`🤖 自動選擇的最佳 Flash 模型: [${flashModels[0]}]`);
+        return flashModels[0];
+      }
+    }
+  } catch (err) {
+    Logger.log("⚠️ 取得模型清單失敗，使用預設值: " + err.toString());
+  }
+
+  return defaultModel;
+}
+
+function getCandidateModels() {
+  const dynamicModel = getLatestFlashModelName();
+  return Array.from(new Set([
+    "gemini-flash-lite-latest",
+    dynamicModel,
+    "gemini-flash-latest",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash"
+  ].filter(Boolean)));
+}
+
+// ==========================
+// 4. LINE Webhook 接收端 (嚴格區隔：群組公務 vs 個人私聊)
 // ==========================
 function doPost(e) {
   try {
@@ -166,91 +235,30 @@ function doPost(e) {
 
       const message = event.message;
       const timestamp = new Date(event.timestamp);
-      const isOneOnOne = (event.source.type === 'user');
+      const sourceType = event.source.type; // 'user', 'group', 'room'
       const userId = event.source.userId || '';
+      const groupId = event.source.groupId || event.source.roomId || '';
       const rawSenderName = getUserDisplayName(event.source);
       const messageId = message.id;
       const messageType = message.type; // text, image, file
 
-      // --- [發言人名冊自動建檔與身分連結] ---
-      let affiliation = { department: '', title: '', officialSender: rawSenderName };
-      if (userId) {
-        // 自動登記或更新發言人 LINE ID 至 Member_Directory
-        affiliation = registerOrUpdateMember(memberSheet, userId, rawSenderName, timestamp);
+      // 🛡️【安全邊界 1】：1 對 1 私人對話處理 (絕對不存入 Raw_Messages，不當公務發送)
+      if (sourceType === 'user') {
+        handleOneOnOneChat(event, userId, message, rawSheet, memberSheet);
+        continue; // 🛑 私人對話處理完畢，直接結束本則事件，不往下執行記錄！
       }
 
-      // --- [管理功能] 1對1 私訊指令選單與特殊操作 ---
-      if (isOneOnOne && messageType === 'text') {
-        const textLower = message.text.trim().toLowerCase();
-
-        // 1. 查詢自己的 LINE User ID
-        if (textLower === '我的id' || textLower === 'id' || textLower === '!id') {
-          replyWithMenu(event.replyToken, `🆔 您的 LINE User ID 為：\n${userId}\n\n可將此代碼填入 GAS 的指令碼屬性 ADMIN_USER_ID 中！`);
-          continue;
-        }
-
-        // 2. 指令選單 / 說明
-        if (textLower === '選單' || textLower === 'menu' || textLower === '!menu' || textLower === '說明' || textLower === '!help') {
-          sendAdminMenuCard(event.replyToken);
-          continue;
-        }
-
-        // 3. 管理員指令：!status (查詢待處理筆數)
-        if (textLower === '!status' || textLower === '查詢狀態' || textLower === '狀態') {
-          if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-            replyWithMenu(event.replyToken, '❌ 抱歉，您不是系統管理員，無法查看系統狀態。');
-          } else {
-            const pendingCount = getPendingMessageCount(rawSheet);
-            replyWithMenu(event.replyToken, `📊 系統狀態報告：\n目前試算表中待彙整派報的訊息共有 【${pendingCount}】 筆。\n\n💡 提示：若該時段待處理為 0 筆，系統將自動跳過、不會寄信！`);
-          }
-          continue;
-        }
-
-        // 4. 管理員指令：!members (查看群組已登記發言人員與單位設定狀態)
-        if (textLower === '!members' || textLower === '人員名冊' || textLower === '名冊') {
-          if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-            replyWithMenu(event.replyToken, '❌ 抱歉，您不是系統管理員，無法查看人員名冊。');
-          } else {
-            const memberSummary = getMemberDirectorySummary(memberSheet);
-            replyWithMenu(event.replyToken, memberSummary);
-          }
-          continue;
-        }
-
-        // 5. 管理員指令：!send (立即手動觸發一次彙整並寄信)
-        if (textLower === '!send' || textLower === '立即派報' || textLower === '手動派報') {
-          if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-            replyWithMenu(event.replyToken, '❌ 抱歉，您不是系統管理員，無法執行手動派報。');
-          } else {
-            const pendingCount = getPendingMessageCount(rawSheet);
-            if (pendingCount === 0) {
-              replyWithMenu(event.replyToken, 'ℹ️ 目前試算表中【無任何新訊息】，依系統規則本次不寄發信件。');
-            } else {
-              replyWithMenu(event.replyToken, `🚀 已收到管理員指令！偵測到有 ${pendingCount} 筆待處理訊息，系統正在執行彙整並以單位名義發信...`);
-              processAndSendDigest('管理員手動即時觸發');
-            }
-          }
-          continue;
-        }
-
-        // 6. 管理員指令：!test (手機一鍵測試 Gemini AI)
-        if (textLower === '!test' || textLower === '測試ai' || textLower === '測試') {
-          if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-            replyWithMenu(event.replyToken, '❌ 抱歉，您不是系統管理員，無法執行 AI 測試。');
-          } else {
-            replyWithMenu(event.replyToken, '🧪 正在連線測試 Gemini AI 模型與單位身分解析中，請稍候約 1~3 秒...');
-            const testResult = testGeminiApi();
-            notifyAdmin(testResult);
-          }
-          continue;
-        }
-
-        // 7. 其他文字預設回傳指令選單
-        sendAdminMenuCard(event.replyToken);
+      // 🛡️【安全邊界 2】：群組對話過濾 (若設定 TARGET_GROUP_ID，則鎖定指定召集人群組)
+      if (TARGET_GROUP_ID && groupId !== TARGET_GROUP_ID) {
+        console.log(`忽略來自非目標群組的訊息 (groupId: ${groupId})`);
         continue;
       }
 
-      // --- [常態群組記錄] 接收文字、圖片與 PDF 檔案 ---
+      // --- [正式群組公務收集流程] ---
+      // 1. 自動登記/更新發言人 LINE ID 至 Member_Directory
+      const affiliation = registerOrUpdateMember(memberSheet, userId, rawSenderName, timestamp);
+
+      // 2. 接收文字、圖片與 PDF 檔案
       let textContent = '';
       let driveFileId = '';
       let driveFileUrl = '';
@@ -268,10 +276,10 @@ function doPost(e) {
         }
       }
 
-      // 關聯同一個發布者在 2 分鐘內的訊息（Group ID）
+      // 3. 關聯同一個發布者在 2 分鐘內的訊息（Group ID）
       const sessionGroupId = generateSessionGroupId(rawSheet, affiliation.officialSender, timestamp);
 
-      // 寫入 Google Sheets 原始訊息表 (記錄發言人 ID 與單位代表身分)
+      // 4. 寫入 Google Sheets 原始訊息表
       rawSheet.appendRow([
         messageId,
         timestamp,
@@ -284,7 +292,7 @@ function doPost(e) {
         driveFileId,
         driveFileUrl,
         sessionGroupId,
-        false,                      // is_processed
+        false,                      // is_processed (待處理)
         ''                          // batch_tag
       ]);
     }
@@ -295,6 +303,83 @@ function doPost(e) {
     notifyAdmin(`⚠️ LINE Webhook 發生錯誤：${err.message}`);
     return ContentService.createTextOutput(JSON.stringify({ status: 'error', message: err.message })).setMimeType(ContentService.MimeType.JSON);
   }
+}
+
+/**
+ * 🔒 1 對 1 私聊專屬處理：只處理管理指令或個人選單，絕不記錄發送
+ */
+function handleOneOnOneChat(event, userId, message, rawSheet, memberSheet) {
+  if (message.type !== 'text') {
+    replyWithMenu(event.replyToken, 'ℹ️ 您好！本機器人僅在「召集人群組」中收集公務通報。\n個人私訊對話內容不會被記錄或公開發送。');
+    return;
+  }
+
+  const textLower = message.text.trim().toLowerCase();
+
+  // 1. 查詢自己的 LINE User ID
+  if (textLower === '我的id' || textLower === 'id' || textLower === '!id') {
+    replyWithMenu(event.replyToken, `🆔 您的 LINE User ID 為：\n${userId}\n\n若您是管理員，可將此代碼填入 GAS 的指令碼屬性 ADMIN_USER_ID 中！`);
+    return;
+  }
+
+  // 2. 指令選單 / 說明
+  if (textLower === '選單' || textLower === 'menu' || textLower === '!menu' || textLower === '說明' || textLower === '!help') {
+    sendAdminMenuCard(event.replyToken);
+    return;
+  }
+
+  // 3. 管理員指令：!status (查詢待處理筆數)
+  if (textLower === '!status' || textLower === '查詢狀態' || textLower === '狀態') {
+    if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
+      replyWithMenu(event.replyToken, '❌ 抱歉，此功能為系統管理員專用指令。');
+    } else {
+      const pendingCount = getPendingMessageCount(rawSheet);
+      replyWithMenu(event.replyToken, `📊 系統狀態報告：\n目前試算表中待彙整派報的群組公務訊息共有 【${pendingCount}】 筆。\n\n💡 提示：若該時段待處理為 0 筆，系統將自動跳過不寄信。`);
+    }
+    return;
+  }
+
+  // 4. 管理員指令：!members (查看群組已登記發言人員名冊)
+  if (textLower === '!members' || textLower === '人員名冊' || textLower === '名冊') {
+    if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
+      replyWithMenu(event.replyToken, '❌ 抱歉，此功能為系統管理員專用指令。');
+    } else {
+      const memberSummary = getMemberDirectorySummary(memberSheet);
+      replyWithMenu(event.replyToken, memberSummary);
+    }
+    return;
+  }
+
+  // 5. 管理員指令：!send (立即手動觸發一次彙整並寄信)
+  if (textLower === '!send' || textLower === '立即派報' || textLower === '手動派報') {
+    if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
+      replyWithMenu(event.replyToken, '❌ 抱歉，此功能為系統管理員專用指令。');
+    } else {
+      const pendingCount = getPendingMessageCount(rawSheet);
+      if (pendingCount === 0) {
+        replyWithMenu(event.replyToken, 'ℹ️ 目前群組【無任何待處理新訊息】，依系統規則本次不寄發信件。');
+      } else {
+        replyWithMenu(event.replyToken, `🚀 已收到管理員指令！偵測到有 ${pendingCount} 筆待處理群組訊息，系統正在彙整派發中...`);
+        processAndSendDigest('管理員手動即時觸發');
+      }
+    }
+    return;
+  }
+
+  // 6. 管理員指令：!test (手機一鍵測試 Gemini AI)
+  if (textLower === '!test' || textLower === '測試ai' || textLower === '測試') {
+    if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
+      replyWithMenu(event.replyToken, '❌ 抱歉，此功能為系統管理員專用指令。');
+    } else {
+      replyWithMenu(event.replyToken, '🧪 正在連線測試 Gemini AI 模型與單位身分解析中，請稍候約 1~3 秒...');
+      const testResult = testGeminiApi();
+      notifyAdmin(testResult);
+    }
+    return;
+  }
+
+  // 7. 其他一般老師私聊文字：回覆提示與選單，絕對不記錄！
+  sendAdminMenuCard(event.replyToken);
 }
 
 // ==========================
@@ -313,14 +398,20 @@ function processAndSendDigest(timeSlotLabel) {
   const rawSheet = ss.getSheetByName(SHEET_RAW);
   const teacherSheet = ss.getSheetByName(SHEET_TEACHERS);
   const digestSheet = ss.getSheetByName(SHEET_DIGEST);
-  if (!rawSheet || !teacherSheet) return;
+  if (!rawSheet || !teacherSheet) {
+    console.error('找不到 Raw_Messages 或 Teacher_List 工作表！');
+    return;
+  }
 
   const data = rawSheet.getDataRange().getValues();
-  if (data.length <= 1) return;
+  if (data.length <= 1) {
+    console.log(`[${timeSlotLabel}] 試算表目前為空，略過。`);
+    return;
+  }
 
   const pendingRows = [];
   for (let r = 1; r < data.length; r++) {
-    const isProcessed = data[r][11]; // is_processed 在 L 欄 (第12欄)
+    const isProcessed = data[r][11]; // is_processed 在第 12 欄 (L欄)
     if (isProcessed === false || isProcessed === 'FALSE') {
       pendingRows.push({
         rowIndex: r + 1,
@@ -329,7 +420,7 @@ function processAndSendDigest(timeSlotLabel) {
         userId: data[r][2],
         rawSender: data[r][3],
         department: data[r][4],
-        sender: data[r][5] || data[r][3], // 優先以官方代表身分
+        sender: data[r][5] || data[r][3],
         type: data[r][6],
         content: data[r][7],
         fileId: data[r][8],
@@ -339,16 +430,16 @@ function processAndSendDigest(timeSlotLabel) {
     }
   }
 
-  // 🛡️【無訊息防護關卡 1】：若待處理訊息為 0 筆，直接終止，絕對不寄發空白信件！
+  // 🛡️【防護關卡 1】：若待處理訊息為 0 筆，直接終止，絕對不寄發空白信件！
   if (pendingRows.length === 0) {
     console.log(`[${timeSlotLabel}] 該時段完全無待處理新訊息，系統略過不寄信。`);
     return;
   }
 
-  // 1. 利用 Gemini API 進行「全校公告 vs 僅召集人事務」判斷，並以單位名義重構重點摘要
+  // 1. 利用 Gemini API 進行「全校公告 vs 僅召集人事務」判斷
   const digestResult = analyzeAndSummarizeWithGemini(pendingRows);
 
-  // 🛡️【無公告防護關卡 2】：若訊息經 AI 判斷全數為「召集人內部事項」，自動歸檔並終止，不打擾全校老師！
+  // 🛡️【防護關卡 2】：若訊息經 AI 判斷全數為召集人內部事項，自動歸檔，不打擾全校老師！
   if (!digestResult.items || digestResult.items.length === 0) {
     console.log(`[${timeSlotLabel}] 該時段訊息經判斷皆屬召集人內部工作，無需公告給全體老師，系統不寄信。`);
     markRowsAsProcessed(rawSheet, pendingRows, `${timeSlotLabel}_SKIPPED`);
@@ -370,41 +461,49 @@ function processAndSendDigest(timeSlotLabel) {
     }
   });
 
-  // 3. 組合 HTML 郵件內容 (強調以處室單位名義發文)
+  // 3. 組合 HTML 郵件內容
   const htmlBody = generateHtmlEmail(timeSlotLabel, digestResult);
 
   // 4. 取得教師 Email 清單並寄送
   const recipients = getTeacherEmailList(teacherSheet);
-  if (recipients.length > 0) {
-    const todayStr = Utilities.formatDate(new Date(), 'GMT+8', 'yyyy/MM/dd');
-    const subject = `【竹林召集人通報】${todayStr} ${timeSlotLabel} 重點訊息整理`;
+  console.log(`取得啟用的教師 Email 名冊數量：${recipients.length} 位`);
 
-    try {
-      GmailApp.sendEmail(recipients.join(','), subject, '請使用支援 HTML 的郵件客戶端開啟本通知。', {
-        htmlBody: htmlBody,
-        attachments: attachments,
-        name: '竹林召集人智慧秘書'
-      });
-      console.log(`已成功發送郵件給 ${recipients.length} 位老師。`);
+  if (recipients.length === 0) {
+    console.warn('⚠️ 警告：Teacher_List 工作表中沒有任何啟用 (TRUE) 的教師 Email，無法寄出信件！');
+    notifyAdmin('⚠️ 派報失敗：Teacher_List 工作表中沒有啟用 (TRUE) 的教師 Email，請檢查試算表名冊！');
+    return;
+  }
 
-      // 寫入 Digest_Summaries 歷史記錄
-      if (digestSheet) {
-        digestSheet.appendRow([
-          `DIG-${Utilities.formatDate(new Date(), 'GMT+8', 'yyyyMMdd-HHmm')}`,
-          new Date(),
-          timeSlotLabel,
-          digestResult.items.map(it => it.department || it.category).join('、'),
-          digestResult.items[0].title,
-          digestResult.summary,
-          attachments.length,
-          recipients.length,
-          'SUCCESS'
-        ]);
-      }
-    } catch (e) {
-      console.error('Gmail 寄送失敗: ' + e.message);
-      notifyAdmin(`⚠️ 寄發 Email 失敗：${e.message}`);
+  const todayStr = Utilities.formatDate(new Date(), 'GMT+8', 'yyyy/MM/dd');
+  const subject = `【竹林召集人通報】${todayStr} ${timeSlotLabel} 重點訊息整理`;
+
+  try {
+    GmailApp.sendEmail(recipients.join(','), subject, '請使用支援 HTML 的郵件客戶端開啟本通知。', {
+      htmlBody: htmlBody,
+      attachments: attachments,
+      name: '竹林召集人智慧秘書'
+    });
+    console.log(`已成功發送郵件給 ${recipients.length} 位老師。`);
+
+    // 寫入 Digest_Summaries 歷史記錄
+    if (digestSheet) {
+      digestSheet.appendRow([
+        `DIG-${Utilities.formatDate(new Date(), 'GMT+8', 'yyyyMMdd-HHmm')}`,
+        new Date(),
+        timeSlotLabel,
+        digestResult.items.map(it => it.department || it.category).join('、'),
+        digestResult.items[0].title,
+        digestResult.summary,
+        attachments.length,
+        recipients.length,
+        'SUCCESS'
+      ]);
     }
+
+    notifyAdmin(`✅ 已完成 [${timeSlotLabel}] 訊息派報，共整理 ${digestResult.items.length} 則公告，發送給 ${recipients.length} 位老師！`);
+  } catch (e) {
+    console.error('Gmail 寄送失敗: ' + e.message);
+    notifyAdmin(`⚠️ 寄發 Email 失敗：${e.message}`);
   }
 
   // 5. 標記訊息為已處理
@@ -538,15 +637,12 @@ function registerOrUpdateMember(sheet, userId, displayName, timestamp) {
   const timeStr = Utilities.formatDate(timestamp, 'GMT+8', 'yyyy-MM-dd HH:mm:ss');
 
   if (foundRow > 0) {
-    // 已存在，更新暱稱與最後發言時間
     sheet.getRange(foundRow, 2).setValue(displayName);
     sheet.getRange(foundRow, 6).setValue(timeStr);
   } else {
-    // 新發言人，自動新增一列等待管理員填入處室/職稱
     sheet.appendRow([userId, displayName, '', '', '', timeStr]);
   }
 
-  // 組合官方顯示代表：若有設定 official_sender 則使用，若有處室則前綴處室
   let finalSender = officialSender;
   if (!finalSender) {
     if (department) {
@@ -641,10 +737,7 @@ function sendAdminMenuCard(replyToken) {
 🆔 查詢我的ID (輸入 !id)
   取得您的 33 碼 LINE User ID
 
-⏰ 系統固定派報時程：
-  • 第一梯次：每日 12:00
-  • 第二梯次：每日 16:00
-  💡 規則：若該時段無新訊息，系統將自動跳過不寄信。`;
+🔒 安全提示：個人私聊傳訊不會被記錄或公開發送，請放心！`;
 
   replyWithMenu(replyToken, menuText);
 }
@@ -713,12 +806,12 @@ function generateSessionGroupId(sheet, senderName, timestamp) {
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return Utilities.getUuid();
 
-  const lastSender = sheet.getRange(lastRow, 6).getValue(); // 檢查官方身分 (第6欄)
+  const lastSender = sheet.getRange(lastRow, 6).getValue();
   const lastTime = new Date(sheet.getRange(lastRow, 2).getValue());
   const diffMinutes = (timestamp - lastTime) / (1000 * 60);
 
   if (lastSender === senderName && diffMinutes <= 2) {
-    return sheet.getRange(lastRow, 11).getValue(); // session_group_id 在第11欄
+    return sheet.getRange(lastRow, 11).getValue();
   }
   return Utilities.getUuid();
 }
@@ -747,8 +840,8 @@ function getPendingMessageCount(sheet) {
 
 function markRowsAsProcessed(sheet, rows, batchTag) {
   rows.forEach(r => {
-    sheet.getRange(r.rowIndex, 12).setValue(true);     // is_processed 在第12欄
-    sheet.getRange(r.rowIndex, 13).setValue(batchTag); // batch_tag 在第13欄
+    sheet.getRange(r.rowIndex, 12).setValue(true);
+    sheet.getRange(r.rowIndex, 13).setValue(batchTag);
   });
 }
 
