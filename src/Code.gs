@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 學校召集人 LINE Bot 訊息智慧彙整與派報系統
  * Google Apps Script (GAS) 核心程式碼
  */
@@ -194,7 +194,7 @@ function doPost(e) {
       const messageId = message.id;
       const messageType = message.type;
 
-      // 🛡️【安全邊界】：1 對 1 私人對話處理 (依管理員/一般老師嚴格劃分選單功能)
+      // 🛡️【安全邊界】：1 對 1 私人對話處理
       if (sourceType === 'user') {
         handleOneOnOneChat(event, userId, rawSenderName, message, rawSheet, memberSheet, teacherSheet);
         continue;
@@ -253,7 +253,7 @@ function doPost(e) {
 }
 
 // ==========================
-// 5. 1 對 1 私聊處理：權限分離與 Email 查詢/修改邏輯
+// 5. 1 對 1 私聊處理：身分綁定、信箱修改、管理員審核預覽與指令
 // ==========================
 function handleOneOnOneChat(event, userId, rawSenderName, message, rawSheet, memberSheet, teacherSheet) {
   const isAdmin = isUserAdmin(userId);
@@ -274,7 +274,6 @@ function handleOneOnOneChat(event, userId, rawSenderName, message, rawSheet, mem
   // ----------------------------------------------------
   if (textLower === '身分綁定' || textLower === '綁定' || textLower === '修改email' || textLower === '修改信箱' || textLower === '!bind') {
     if (boundProfile) {
-      // 💡 核心邏輯：已經綁定過，再次點選時提供「舊 Mail」，引導輸入「新 Mail」修改
       const msg = `👤【教師身分綁定狀態】\n\n` +
                   `• 姓名：${boundProfile.name} 老師\n` +
                   `• 處室/科別：${boundProfile.department}\n` +
@@ -287,7 +286,6 @@ function handleOneOnOneChat(event, userId, rawSenderName, message, rawSheet, mem
       replyForUser(event.replyToken, userId, boundProfile, msg);
       return;
     } else {
-      // 尚未綁定過，引導輸入姓名與 Email
       const promptMsg = `📝【教師身分綁定】\n` +
                         `您好 ${rawSenderName} 老師！請依照以下格式回覆您的姓名與公務 Email：\n\n` +
                         `👉 範例：\n` +
@@ -305,7 +303,6 @@ function handleOneOnOneChat(event, userId, rawSenderName, message, rawSheet, mem
     const newEmail = emailMatch[0].trim();
 
     if (boundProfile) {
-      // 💡 老師已綁定過，這次輸入是要「修改舊信箱」
       const oldEmail = boundProfile.email;
       teacherSheet.getRange(boundProfile.rowIndex, 2).setValue(newEmail);
       teacherSheet.getRange(boundProfile.rowIndex, 3).setValue(true);
@@ -323,7 +320,6 @@ function handleOneOnOneChat(event, userId, rawSenderName, message, rawSheet, mem
       replyForUser(event.replyToken, userId, updatedProfile, successMsg);
       return;
     } else {
-      // 尚未綁定過，執行初次綁定
       let extractedName = text.replace(newEmail, '').replace(/綁定|修改信箱|修改email|老師|主任|組長|：|:/g, '').trim();
       if (!extractedName) extractedName = rawSenderName;
 
@@ -343,62 +339,310 @@ function handleOneOnOneChat(event, userId, rawSenderName, message, rawSheet, mem
   }
 
   // ----------------------------------------------------
-  // 4. 管理員專屬指令區 (非管理員一律阻擋，不顯示功能)
+  // 4. 管理員專屬：郵件審核預覽、挑選剔除與派發控制
   // ----------------------------------------------------
-  if (textLower === '!status' || textLower === '查詢狀態' || textLower === '狀態') {
-    if (!isAdmin) {
+  if (isAdmin) {
+    // 🔍 功能 A：【預覽信件】
+    if (textLower === '!preview' || textLower === '預覽信件' || textLower === '預覽') {
+      const previewMsg = buildAdminPreviewMessage(rawSheet);
+      replyForUser(event.replyToken, userId, boundProfile, previewMsg);
+      return;
+    }
+
+    // ❌ / ✅ 功能 B：【挑選剔除或保留特定項目】(例如輸入: 剔除 1、保留 2、切換 3)
+    const toggleMatch = text.match(/^(剔除|保留|切換|!toggle|!exclude|!include)\s*(\d+)$/i);
+    if (toggleMatch) {
+      const action = toggleMatch[1];
+      const itemIndex = parseInt(toggleMatch[2], 10);
+      const toggleMsg = toggleReviewItem(itemIndex, action);
+      replyForUser(event.replyToken, userId, boundProfile, toggleMsg);
+      return;
+    }
+
+    // 📧 功能 C：【試寄給我 (單獨寄給管理員看效果)】
+    if (textLower === '!testmail' || textLower === '試寄給我' || textLower === '寄給我預覽') {
+      const adminEmail = boundProfile ? boundProfile.email : Session.getActiveUser().getEmail();
+      const sendPreviewMsg = sendPreviewEmailToAdmin(rawSheet, adminEmail);
+      replyForUser(event.replyToken, userId, boundProfile, sendPreviewMsg);
+      return;
+    }
+
+    // 🚀 功能 D：【確認寄出 (只發送已選取的項目)】
+    if (textLower === '!confirm' || textLower === '確認寄出' || textLower === '!send' || textLower === '立即派報') {
+      const resultMsg = executeApprovedDigest(rawSheet, teacherSheet);
+      replyForUser(event.replyToken, userId, boundProfile, resultMsg);
+      return;
+    }
+
+    // 📊 功能 E：查詢狀態
+    if (textLower === '!status' || textLower === '查詢狀態' || textLower === '狀態') {
+      const pendingCount = getPendingMessageCount(rawSheet);
+      replyForUser(event.replyToken, userId, boundProfile, `📊 系統狀態報告：\n目前試算表中待派報的群組公務訊息共有 【${pendingCount}】 筆。\n\n💡 您可點選下方【🔍 預覽信件】先審核並挑選發布內容！`);
+      return;
+    }
+
+    // 👥 功能 F：人員名冊
+    if (textLower === '!members' || textLower === '人員名冊' || textLower === '名冊') {
+      const memberSummary = getMemberDirectorySummary(memberSheet);
+      replyForUser(event.replyToken, userId, boundProfile, memberSummary);
+      return;
+    }
+
+    // 🧪 功能 G：測試 AI
+    if (textLower === '!test' || textLower === '測試ai' || textLower === '測試') {
+      replyForUser(event.replyToken, userId, boundProfile, '🧪 正在連線測試 Gemini AI 模型中，請稍候約 1~3 秒...');
+      const testResult = testGeminiApi();
+      notifyAdmin(testResult);
+      return;
+    }
+  } else {
+    // 非管理員輸入了任何指令
+    if (text.startsWith('!') || text.includes('狀態') || text.includes('派報') || text.includes('預覽') || text.includes('名冊')) {
       replyForUser(event.replyToken, userId, boundProfile, '❌ 抱歉，此功能為系統管理員專屬權限。一般同仁僅開放「身分綁定 / 修改信箱」功能。');
       return;
     }
-    const pendingCount = getPendingMessageCount(rawSheet);
-    replyForUser(event.replyToken, userId, boundProfile, `📊 系統狀態報告：\n目前試算表中待彙整派報的群組公務訊息共有 【${pendingCount}】 筆。\n\n💡 提示：若該時段待處理為 0 筆，系統將自動跳過不寄信。`);
-    return;
-  }
-
-  if (textLower === '!members' || textLower === '人員名冊' || textLower === '名冊') {
-    if (!isAdmin) {
-      replyForUser(event.replyToken, userId, boundProfile, '❌ 抱歉，此功能為系統管理員專屬權限。');
-      return;
-    }
-    const memberSummary = getMemberDirectorySummary(memberSheet);
-    replyForUser(event.replyToken, userId, boundProfile, memberSummary);
-    return;
-  }
-
-  if (textLower === '!send' || textLower === '立即派報' || textLower === '手動派報') {
-    if (!isAdmin) {
-      replyForUser(event.replyToken, userId, boundProfile, '❌ 抱歉，此功能為系統管理員專屬權限。');
-      return;
-    }
-    const pendingCount = getPendingMessageCount(rawSheet);
-    if (pendingCount === 0) {
-      replyForUser(event.replyToken, userId, boundProfile, 'ℹ️ 目前群組【無任何待處理新訊息】，依系統規則本次不寄發信件。');
-    } else {
-      replyForUser(event.replyToken, userId, boundProfile, `🚀 已收到管理員指令！偵測到有 ${pendingCount} 筆待處理群組訊息，系統正在彙整派發中...`);
-      processAndSendDigest('管理員手動即時觸發');
-    }
-    return;
-  }
-
-  if (textLower === '!test' || textLower === '測試ai' || textLower === '測試') {
-    if (!isAdmin) {
-      replyForUser(event.replyToken, userId, boundProfile, '❌ 抱歉，此功能為系統管理員專屬權限。');
-      return;
-    }
-    replyForUser(event.replyToken, userId, boundProfile, '🧪 正在連線測試 Gemini AI 模型中，請稍候約 1~3 秒...');
-    const testResult = testGeminiApi();
-    notifyAdmin(testResult);
-    return;
   }
 
   // ----------------------------------------------------
-  // 5. 預設導引面板 (依管理員 / 一般老師顯示不同內容)
+  // 5. 預設導引面板
   // ----------------------------------------------------
   sendAppropriateMenu(event.replyToken, userId, rawSenderName, boundProfile);
 }
 
 // ==========================
-// 6. 身分綁定核心資料庫處理函式
+// 6. 管理員審核與預覽系統核心 (Preview & Curation Engine)
+// ==========================
+
+/**
+ * 產出當前待處理訊息的 Gemini 預覽審核清單，並暫存審核狀態
+ */
+function buildAdminPreviewMessage(rawSheet) {
+  const pendingRows = getPendingRows(rawSheet);
+  if (pendingRows.length === 0) {
+    return 'ℹ️ 目前試算表中【無任何待處理新訊息】，暫無可預覽之信件內容。';
+  }
+
+  // 呼叫 Gemini 進行結構化萃取
+  const digestResult = analyzeAndSummarizeWithGemini(pendingRows);
+  if (!digestResult.items || digestResult.items.length === 0) {
+    return 'ℹ️ 目前累積的訊息經 AI 判讀皆屬「召集人內部事項」，預計略過不寄信。';
+  }
+
+  // 檢查是否已有暫存的剔除清單，若無則預設全選 (included = true)
+  const cacheKey = 'ACTIVE_REVIEW_DIGEST';
+  const cachedJson = SCRIPT_PROPERTIES.getProperty(cacheKey);
+  let reviewState = [];
+
+  if (cachedJson) {
+    try {
+      reviewState = JSON.parse(cachedJson);
+    } catch (e) { reviewState = []; }
+  }
+
+  // 整合審核項目
+  const items = digestResult.items.map((item, idx) => {
+    const existing = reviewState.find(r => r.title === item.title);
+    return {
+      index: idx + 1,
+      department: item.department || '學校行政處室',
+      category: item.category || '公務通知',
+      title: item.title,
+      official_sender: item.official_sender || item.sender || '行政同仁',
+      points: item.points || [],
+      included: existing ? existing.included : true // 預設皆為發送狀態
+    };
+  });
+
+  // 儲存至 ScriptProperties 作為當前審核狀態
+  SCRIPT_PROPERTIES.setProperty(cacheKey, JSON.stringify(items));
+  SCRIPT_PROPERTIES.setProperty('ACTIVE_REVIEW_SUMMARY', digestResult.summary || '半日公務通報');
+
+  return formatPreviewText(items, digestResult.summary);
+}
+
+function formatPreviewText(items, summary) {
+  let listStr = '';
+  let activeCount = 0;
+
+  items.forEach(it => {
+    const statusIcon = it.included ? '✅【發送】' : '❌【剔除不發】';
+    if (it.included) activeCount++;
+    listStr += `\n[${it.index}] ${statusIcon} ${it.title}\n` +
+               `    🏢 單位：${it.department} (${it.official_sender})\n` +
+               `    📌 摘要：${(it.points[0] || '').substring(0, 35)}...\n`;
+  });
+
+  return `📋【即將發出之半日通報預覽】\n` +
+         `💡 本期總結：${summary}\n` +
+         `📊 預計發送：${activeCount} / ${items.length} 則項目\n` +
+         `------------------------------------\n` +
+         `${listStr}\n` +
+         `------------------------------------\n` +
+         `✏️【如何選擇發送項目？】\n` +
+         `• 輸入「剔除 1」可將第 1 項取消發送\n` +
+         `• 輸入「保留 1」可重新納入發送\n\n` +
+         `👉 審核完成後，請點擊下方：\n` +
+         `• 【📧 試寄給我】：先寄一封到您信箱看版面\n` +
+         `• 【🚀 確認寄出】：正式發信給全體老師！`;
+}
+
+function toggleReviewItem(index, action) {
+  const cacheKey = 'ACTIVE_REVIEW_DIGEST';
+  const cachedJson = SCRIPT_PROPERTIES.getProperty(cacheKey);
+  if (!cachedJson) return '⚠️ 尚未建立預覽清單，請先點選【🔍 預覽信件】！';
+
+  let items = JSON.parse(cachedJson);
+  const target = items.find(it => it.index === index);
+  if (!target) return `❌ 找不到編號為 [${index}] 的項目，目前共有 1 ~ ${items.length} 項。`;
+
+  if (action.includes('剔除') || action.includes('exclude')) {
+    target.included = false;
+  } else if (action.includes('保留') || action.includes('include')) {
+    target.included = true;
+  } else {
+    target.included = !target.included;
+  }
+
+  SCRIPT_PROPERTIES.setProperty(cacheKey, JSON.stringify(items));
+  const summary = SCRIPT_PROPERTIES.getProperty('ACTIVE_REVIEW_SUMMARY') || '';
+
+  return `🔄 已更新第 [${index}] 項狀態為：${target.included ? '✅ 發送' : '❌ 剔除不發'}\n\n` +
+         formatPreviewText(items, summary);
+}
+
+function sendPreviewEmailToAdmin(rawSheet, adminEmail) {
+  const cacheKey = 'ACTIVE_REVIEW_DIGEST';
+  const cachedJson = SCRIPT_PROPERTIES.getProperty(cacheKey);
+  if (!cachedJson) return '⚠️ 尚未建立預覽清單，請先點選【🔍 預覽信件】！';
+
+  const items = JSON.parse(cachedJson);
+  const approvedItems = items.filter(it => it.included);
+
+  if (approvedItems.length === 0) {
+    return '⚠️ 目前所有項目皆被設為「剔除」，無任何內容可寄送！請至少保留一項。';
+  }
+
+  const summary = SCRIPT_PROPERTIES.getProperty('ACTIVE_REVIEW_SUMMARY') || '管理員預覽信件';
+  const htmlBody = generateHtmlEmail('管理員審核預覽', { summary: summary, items: approvedItems });
+  const pendingRows = getPendingRows(rawSheet);
+
+  // 抓取附件
+  const attachments = collectAttachments(pendingRows);
+
+  try {
+    GmailApp.sendEmail(adminEmail, `【管理員審核預覽】竹林召集人半日通報 (${approvedItems.length}則)`, '請使用支援 HTML 的郵件閱讀器。', {
+      htmlBody: htmlBody,
+      attachments: attachments,
+      name: '竹林召集人智慧秘書 (預覽)'
+    });
+    return `🎉 預覽信已成功發送至您的信箱：\n👉 ${adminEmail}\n\n請開啟手機 Gmail 查看排版，確認無誤後點擊【🚀 確認寄出】！`;
+  } catch (err) {
+    return `❌ 試寄失敗：${err.message}`;
+  }
+}
+
+function executeApprovedDigest(rawSheet, teacherSheet) {
+  const pendingRows = getPendingRows(rawSheet);
+  if (pendingRows.length === 0) {
+    return 'ℹ️ 目前無待發送的新訊息。';
+  }
+
+  const cacheKey = 'ACTIVE_REVIEW_DIGEST';
+  const cachedJson = SCRIPT_PROPERTIES.getProperty(cacheKey);
+  let approvedItems = [];
+  let summary = '本半日公務通報';
+
+  if (cachedJson) {
+    const items = JSON.parse(cachedJson);
+    approvedItems = items.filter(it => it.included);
+    summary = SCRIPT_PROPERTIES.getProperty('ACTIVE_REVIEW_SUMMARY') || summary;
+  } else {
+    // 若未手動預覽，直接呼叫 Gemini 預設全部發送
+    const digestResult = analyzeAndSummarizeWithGemini(pendingRows);
+    approvedItems = digestResult.items || [];
+    summary = digestResult.summary || summary;
+  }
+
+  if (approvedItems.length === 0) {
+    return 'ℹ️ 所有項目皆已被管理員剔除或為召集人內部事項，本次不寄發信件。';
+  }
+
+  const htmlBody = generateHtmlEmail('半日公務彙整', { summary: summary, items: approvedItems });
+  const attachments = collectAttachments(pendingRows);
+  const recipients = getTeacherEmailList(teacherSheet);
+
+  if (recipients.length === 0) {
+    return '❌ 派報中斷：Teacher_List 工作表中沒有啟用 (TRUE) 的教師 Email！';
+  }
+
+  const todayStr = Utilities.formatDate(new Date(), 'GMT+8', 'yyyy/MM/dd');
+  const subject = `【竹林召集人通報】${todayStr} 重點訊息整理`;
+
+  try {
+    GmailApp.sendEmail(recipients.join(','), subject, '請使用支援 HTML 的郵件閱讀器。', {
+      htmlBody: htmlBody,
+      attachments: attachments,
+      name: '竹林召集人智慧秘書'
+    });
+
+    // 清除審核暫存並標記訊息為已處理
+    SCRIPT_PROPERTIES.deleteProperty(cacheKey);
+    SCRIPT_PROPERTIES.deleteProperty('ACTIVE_REVIEW_SUMMARY');
+    markRowsAsProcessed(rawSheet, pendingRows, 'ADMIN_APPROVED_SENT');
+
+    return `🎉【派報完成！】\n已成功將 ${approvedItems.length} 則經您審核確認之公務通報發送給全體 ${recipients.length} 位老師！`;
+  } catch (e) {
+    return `❌ 寄件失敗：${e.message}`;
+  }
+}
+
+// 輔助函式：取得待處理列
+function getPendingRows(rawSheet) {
+  const data = rawSheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+
+  const pendingRows = [];
+  for (let r = 1; r < data.length; r++) {
+    const isProcessed = data[r][11];
+    if (isProcessed === false || isProcessed === 'FALSE') {
+      pendingRows.push({
+        rowIndex: r + 1,
+        messageId: data[r][0],
+        timestamp: data[r][1],
+        userId: data[r][2],
+        rawSender: data[r][3],
+        department: data[r][4],
+        sender: data[r][5] || data[r][3],
+        type: data[r][6],
+        content: data[r][7],
+        fileId: data[r][8],
+        fileUrl: data[r][9],
+        groupId: data[r][10]
+      });
+    }
+  }
+  return pendingRows;
+}
+
+function collectAttachments(rows) {
+  const attachments = [];
+  const processedFileIds = new Set();
+  rows.forEach(row => {
+    if (row.fileId && !processedFileIds.has(row.fileId)) {
+      try {
+        const file = DriveApp.getFileById(row.fileId);
+        attachments.push(file.getAs(file.getMimeType()));
+        processedFileIds.add(row.fileId);
+      } catch (e) {
+        console.warn('讀取附件失敗: ' + row.fileId, e);
+      }
+    }
+  });
+  return attachments;
+}
+
+// ==========================
+// 7. 身分綁定核心資料庫處理函式
 // ==========================
 function findTeacherProfileByUid(sheet, userId) {
   if (!sheet || !userId) return null;
@@ -503,7 +747,7 @@ function sendWelcomeAndBindingPrompt(replyToken, displayName, boundProfile, user
 }
 
 // ==========================
-// 7. 定時彙整與 Email 派報 (12:00 / 16:00 觸發)
+// 8. 定時自動派報 (12:00 / 16:00 觸發)
 // ==========================
 function runDigest1200() {
   processAndSendDigest('中午 12:00');
@@ -520,58 +764,36 @@ function processAndSendDigest(timeSlotLabel) {
   const digestSheet = ss.getSheetByName(SHEET_DIGEST);
   if (!rawSheet || !teacherSheet) return;
 
-  const data = rawSheet.getDataRange().getValues();
-  if (data.length <= 1) return;
-
-  const pendingRows = [];
-  for (let r = 1; r < data.length; r++) {
-    const isProcessed = data[r][11];
-    if (isProcessed === false || isProcessed === 'FALSE') {
-      pendingRows.push({
-        rowIndex: r + 1,
-        messageId: data[r][0],
-        timestamp: data[r][1],
-        userId: data[r][2],
-        rawSender: data[r][3],
-        department: data[r][4],
-        sender: data[r][5] || data[r][3],
-        type: data[r][6],
-        content: data[r][7],
-        fileId: data[r][8],
-        fileUrl: data[r][9],
-        groupId: data[r][10]
-      });
-    }
-  }
-
+  const pendingRows = getPendingRows(rawSheet);
   if (pendingRows.length === 0) {
     console.log(`[${timeSlotLabel}] 該時段完全無待處理新訊息，系統略過不寄信。`);
     return;
   }
 
-  const digestResult = analyzeAndSummarizeWithGemini(pendingRows);
+  // 檢查是否有管理員預先審核挑選的項目
+  const cacheKey = 'ACTIVE_REVIEW_DIGEST';
+  const cachedJson = SCRIPT_PROPERTIES.getProperty(cacheKey);
+  let approvedItems = [];
+  let summary = '本半日公務通報';
 
-  if (!digestResult.items || digestResult.items.length === 0) {
-    console.log(`[${timeSlotLabel}] 訊息皆屬召集人內部工作，不打擾全校老師，系統不寄信。`);
+  if (cachedJson) {
+    const items = JSON.parse(cachedJson);
+    approvedItems = items.filter(it => it.included);
+    summary = SCRIPT_PROPERTIES.getProperty('ACTIVE_REVIEW_SUMMARY') || summary;
+  } else {
+    const digestResult = analyzeAndSummarizeWithGemini(pendingRows);
+    approvedItems = digestResult.items || [];
+    summary = digestResult.summary || summary;
+  }
+
+  if (approvedItems.length === 0) {
+    console.log(`[${timeSlotLabel}] 訊息皆屬召集人內部工作或已被管理員剔除，系統不寄信。`);
     markRowsAsProcessed(rawSheet, pendingRows, `${timeSlotLabel}_SKIPPED`);
     return;
   }
 
-  const attachments = [];
-  const processedFileIds = new Set();
-  pendingRows.forEach(row => {
-    if (row.fileId && !processedFileIds.has(row.fileId)) {
-      try {
-        const file = DriveApp.getFileById(row.fileId);
-        attachments.push(file.getAs(file.getMimeType()));
-        processedFileIds.add(row.fileId);
-      } catch (e) {
-        console.warn('讀取附件失敗: ' + row.fileId, e);
-      }
-    }
-  });
-
-  const htmlBody = generateHtmlEmail(timeSlotLabel, digestResult);
+  const attachments = collectAttachments(pendingRows);
+  const htmlBody = generateHtmlEmail(timeSlotLabel, { summary: summary, items: approvedItems });
   const recipients = getTeacherEmailList(teacherSheet);
 
   if (recipients.length === 0) {
@@ -594,16 +816,18 @@ function processAndSendDigest(timeSlotLabel) {
         `DIG-${Utilities.formatDate(new Date(), 'GMT+8', 'yyyyMMdd-HHmm')}`,
         new Date(),
         timeSlotLabel,
-        digestResult.items.map(it => it.department || it.category).join('、'),
-        digestResult.items[0].title,
-        digestResult.summary,
+        approvedItems.map(it => it.department || it.category).join('、'),
+        approvedItems[0].title,
+        summary,
         attachments.length,
         recipients.length,
         'SUCCESS'
       ]);
     }
 
-    notifyAdmin(`✅ 已完成 [${timeSlotLabel}] 訊息派報，共整理 ${digestResult.items.length} 則公告，發送給 ${recipients.length} 位老師！`);
+    SCRIPT_PROPERTIES.deleteProperty(cacheKey);
+    SCRIPT_PROPERTIES.deleteProperty('ACTIVE_REVIEW_SUMMARY');
+    notifyAdmin(`✅ 已完成 [${timeSlotLabel}] 訊息派報，共發布 ${approvedItems.length} 則公務公告，發送給 ${recipients.length} 位老師！`);
   } catch (e) {
     console.error('Gmail 寄送失敗: ' + e.message);
     notifyAdmin(`⚠️ 寄發 Email 失敗：${e.message}`);
@@ -613,7 +837,7 @@ function processAndSendDigest(timeSlotLabel) {
 }
 
 // ==========================
-// 8. Gemini API 智慧分類與單位身分發文
+// 9. Gemini API 智慧分類與單位身分發文
 // ==========================
 function analyzeAndSummarizeWithGemini(rows) {
   const apiKey = getActiveGeminiApiKey();
@@ -709,7 +933,7 @@ function fallbackRuleFilter(rows) {
 }
 
 // ==========================
-// 9. 發言人名冊管理 (Member_Directory)
+// 10. 發言人名冊管理 (Member_Directory)
 // ==========================
 function registerOrUpdateMember(sheet, userId, displayName, timestamp) {
   if (!sheet) return { department: '', title: '', officialSender: displayName };
@@ -775,19 +999,20 @@ function getMemberDirectorySummary(sheet) {
 }
 
 // ==========================
-// 10. 權限隔離選單與 Quick Reply
+// 11. 權限隔離選單與 Quick Reply
 // ==========================
 function getQuickReplyForUser(userId, boundProfile) {
   const isAdmin = isUserAdmin(userId);
 
   if (isAdmin) {
-    // 👑 管理員：開啟所有選單功能
+    // 👑 管理員：開啟「預覽信件」、「確認寄出」、「試寄給我」等完整審核功能
     return {
       items: [
+        { type: 'action', action: { type: 'message', label: '🔍 預覽信件', text: '!preview' } },
+        { type: 'action', action: { type: 'message', label: '📧 試寄給我', text: '!testmail' } },
+        { type: 'action', action: { type: 'message', label: '🚀 確認寄出', text: '!confirm' } },
         { type: 'action', action: { type: 'message', label: '📊 查詢狀態', text: '!status' } },
         { type: 'action', action: { type: 'message', label: '👥 人員名冊', text: '!members' } },
-        { type: 'action', action: { type: 'message', label: '🚀 立即派報', text: '!send' } },
-        { type: 'action', action: { type: 'message', label: '🧪 測試AI', text: '!test' } },
         { type: 'action', action: { type: 'message', label: boundProfile ? '✏️ 修改Email' : '📝 身分綁定', text: boundProfile ? '修改Email' : '身分綁定' } },
         { type: 'action', action: { type: 'message', label: '🆔 我的ID', text: '!id' } }
       ]
@@ -834,12 +1059,13 @@ function sendAppropriateMenu(replyToken, userId, rawSenderName, boundProfile) {
   const isAdmin = isUserAdmin(userId);
 
   if (isAdmin) {
-    const adminMenuText = `🛠️【召集人通報秘書・管理員控制台】\n` +
-                          `您好 管理員！請直接點擊下方快捷按鈕操作：\n\n` +
+    const adminMenuText = `🛠️【召集人通報秘書・管理員審核控制台】\n` +
+                          `您好 管理員！您可以先預覽、挑選並決定要發出的公告：\n\n` +
+                          `🔍 預覽信件 (!preview)：查看即將發出之公告清單並選擇項目\n` +
+                          `📧 試寄給我 (!testmail)：將挑選好的內容先寄給您看版面\n` +
+                          `🚀 確認寄出 (!confirm)：確認無誤後，正式群發給全體老師\n` +
                           `📊 狀態查詢 (!status)：查看目前待派報訊息筆數\n` +
                           `👥 人員名冊 (!members)：查看群組發言人處室設定\n` +
-                          `🚀 立即派報 (!send)：手動執行半日彙整並寄發 Email\n` +
-                          `🧪 測試 AI (!test)：測試 Gemini 模型連線\n` +
                           `${boundProfile ? '✏️ 修改Email：變更您的個人接收信箱' : '📝 身分綁定：綁定您的個人教師資料'}\n` +
                           `🆔 我的ID (!id)：查詢您的 33 碼 LINE User ID`;
 
@@ -866,7 +1092,7 @@ function sendAppropriateMenu(replyToken, userId, rawSenderName, boundProfile) {
 }
 
 // ==========================
-// 11. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
+// 12. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
 // ==========================
 function saveLineContentToDrive(messageId, fileName) {
   try {
