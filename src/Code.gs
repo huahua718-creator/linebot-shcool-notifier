@@ -18,23 +18,22 @@ const SHEET_TEACHERS = 'Teacher_List';      // 教師Email通訊錄
 const SHEET_DIGEST = 'Digest_Summaries';    // 彙整派報歷史記錄
 const SHEET_MEMBERS = 'Member_Directory';   // 群組發言人與處室單位對照表
 
-// 取得有效的 Gemini API Key
 function getActiveGeminiApiKey() {
   return GEMINI_API_KEY || SCRIPT_PROPERTIES.getProperty('GEMINI_API_KEY');
+}
+
+function isUserAdmin(userId) {
+  if (!ADMIN_USER_ID) return false;
+  return userId === ADMIN_USER_ID;
 }
 
 // ==========================
 // 2. 測試專用函式專區
 // ==========================
-
-/**
- * 📧 【測試寄信功能】：只寄給管理員測試信件
- */
 function testSendEmailToAdmin() {
   console.log('🚀 開始執行管理員寄信測試 (testSendEmailToAdmin)...');
   const adminEmail = Session.getActiveUser().getEmail();
   console.log(`📬 測試信收件者 Email：${adminEmail}`);
-  
   if (!adminEmail) {
     console.error('❌ 無法自動偵測管理員 Email，請手動指定。');
     return;
@@ -56,17 +55,6 @@ function testSendEmailToAdmin() {
           '煩請各科召集人與任課老師確實檢查內容',
           '若無疑義，今日下午將正式公告全校'
         ]
-      },
-      {
-        department: '學務處',
-        category: '學務與活動',
-        title: '【學務處通知】下週一 (11/09) 全校流感疫苗施打時程',
-        official_sender: '學務處體衛組 (曉光老師)',
-        points: [
-          '施打當日請全校師生務必攜帶「健保卡」',
-          '各班請按表定時程於活動中心舞台前集合',
-          '遇跨兩節課之任課教師，請利用下課時間提前5分鐘交接'
-        ]
       }
     ]
   };
@@ -86,12 +74,8 @@ function testSendEmailToAdmin() {
   }
 }
 
-/**
- * 🧪 測試 Gemini API 是否調用成功
- */
 function testGeminiApi() {
   console.log('🚀 開始測試 Gemini API 連線與動態模型解析...');
-  const candidates = getCandidateModels();
   if (!getActiveGeminiApiKey()) return '❌ 尚未設定 GEMINI_API_KEY！';
 
   const mockMessages = [
@@ -127,24 +111,24 @@ function testGeminiApi() {
 // 3. 動態偵測與模型候選邏輯
 // ==========================
 function getLatestFlashModelName() {
-  const defaultModel = "gemini-flash-lite-latest";
+  const defaultModel = 'gemini-flash-lite-latest';
   const apiKey = getActiveGeminiApiKey();
   if (!apiKey) return defaultModel;
 
   const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
   try {
-    const response = UrlFetchApp.fetch(listUrl, { "muteHttpExceptions": true });
+    const response = UrlFetchApp.fetch(listUrl, { 'muteHttpExceptions': true });
     const result = JSON.parse(response.getContentText());
     if (result.models && Array.isArray(result.models)) {
       const flashModels = result.models
         .filter(m => {
           const name = m.name.toLowerCase();
-          const hasGen = m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent");
-          const isFlash = name.includes("flash");
-          const isExcluded = name.includes("tts") || name.includes("image") || name.includes("computer-use") || name.includes("omni") || name.includes("exp");
+          const hasGen = m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent');
+          const isFlash = name.includes('flash');
+          const isExcluded = name.includes('tts') || name.includes('image') || name.includes('computer-use') || name.includes('omni') || name.includes('exp');
           return hasGen && isFlash && !isExcluded;
         })
-        .map(m => m.name.replace("models/", ""));
+        .map(m => m.name.replace('models/', ''));
 
       if (flashModels.length > 0) {
         flashModels.sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }));
@@ -152,7 +136,7 @@ function getLatestFlashModelName() {
       }
     }
   } catch (err) {
-    Logger.log("⚠️ 取得模型清單失敗: " + err.toString());
+    Logger.log('⚠️ 取得模型清單失敗: ' + err.toString());
   }
   return defaultModel;
 }
@@ -160,11 +144,11 @@ function getLatestFlashModelName() {
 function getCandidateModels() {
   const dynamicModel = getLatestFlashModelName();
   return Array.from(new Set([
-    "gemini-flash-lite-latest",
+    'gemini-flash-lite-latest',
     dynamicModel,
-    "gemini-flash-latest",
-    "gemini-3.6-flash",
-    "gemini-2.5-flash"
+    'gemini-flash-latest',
+    'gemini-3.6-flash',
+    'gemini-2.5-flash'
   ].filter(Boolean)));
 }
 
@@ -195,9 +179,10 @@ function doPost(e) {
       const userId = event.source.userId || '';
       const rawSenderName = getUserDisplayName(event.source);
 
-      // --- [新好友加入或解除封鎖事件：引導輸入姓名與 Email 綁定] ---
+      // --- [新好友加入或解除封鎖事件] ---
       if (event.type === 'follow') {
-        sendWelcomeAndBindingPrompt(event.replyToken, rawSenderName);
+        const boundProfile = findTeacherProfileByUid(teacherSheet, userId);
+        sendWelcomeAndBindingPrompt(event.replyToken, rawSenderName, boundProfile, userId);
         continue;
       }
 
@@ -209,7 +194,7 @@ function doPost(e) {
       const messageId = message.id;
       const messageType = message.type;
 
-      // 🛡️【安全邊界】：1 對 1 私人對話處理 (處理身分綁定或指令，絕不記錄發送)
+      // 🛡️【安全邊界】：1 對 1 私人對話處理 (依管理員/一般老師嚴格劃分選單功能)
       if (sourceType === 'user') {
         handleOneOnOneChat(event, userId, rawSenderName, message, rawSheet, memberSheet, teacherSheet);
         continue;
@@ -268,109 +253,174 @@ function doPost(e) {
 }
 
 // ==========================
-// 5. 1 對 1 私聊處理：引導同仁綁定身分與管理指令
+// 5. 1 對 1 私聊處理：權限分離與 Email 查詢/修改邏輯
 // ==========================
 function handleOneOnOneChat(event, userId, rawSenderName, message, rawSheet, memberSheet, teacherSheet) {
+  const isAdmin = isUserAdmin(userId);
+  const boundProfile = findTeacherProfileByUid(teacherSheet, userId);
+
   if (message.type !== 'text') {
-    replyWithMenu(event.replyToken, 'ℹ️ 您好！本機器人僅在「召集人群組」中收集公務通知。\n若要設定接收每日郵件通知，請直接回覆您的姓名與 Email 進行綁定！');
+    replyForUser(event.replyToken, userId, boundProfile, 'ℹ️ 您好！本對話僅提供身分綁定與信箱設定，群組公務請直接在召集人群組中發布！');
     return;
   }
 
   const text = message.text.trim();
   const textLower = text.toLowerCase();
-
-  // 1. 偵測是否為身分綁定輸入 (包含 Email 格式或含有「綁定」關鍵字)
   const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
   const emailMatch = text.match(emailRegex);
 
-  if (emailMatch || textLower === '身分綁定' || textLower === '綁定' || textLower === '!bind') {
-    if (!emailMatch) {
-      // 點擊按鈕但未帶 Email，提示範例格式
-      const promptMsg = `📝【教師身分綁定引導】\n您好 ${rawSenderName} 老師！請直接回覆您的姓名與公務 Email：\n\n👉 範例格式：\n綁定 王大明 daming@school.tp.edu.tw\n\n（系統將自動在 Teacher_List 名冊中連結您的身分與 LINE 帳號！）`;
-      replyWithMenu(event.replyToken, promptMsg);
+  // ----------------------------------------------------
+  // 1. 身分綁定 / 信箱查詢與修改流程 (所有同仁適用)
+  // ----------------------------------------------------
+  if (textLower === '身分綁定' || textLower === '綁定' || textLower === '修改email' || textLower === '修改信箱' || textLower === '!bind') {
+    if (boundProfile) {
+      // 💡 核心邏輯：已經綁定過，再次點選時提供「舊 Mail」，引導輸入「新 Mail」修改
+      const msg = `👤【教師身分綁定狀態】\n\n` +
+                  `• 姓名：${boundProfile.name} 老師\n` +
+                  `• 處室/科別：${boundProfile.department}\n` +
+                  `• 目前通知信箱 (舊Mail)：\n  👉 ${boundProfile.email}\n` +
+                  `• 接收狀態：${boundProfile.isActive ? '啟用中 (✅)' : '暫停接收 (❌)'}\n\n` +
+                  `✏️【如需修改接收信箱】：\n` +
+                  `請直接在此回覆您的「新Email」即可！\n` +
+                  `👉 範例：修改信箱 new_email@school.tp.edu.tw\n` +
+                  `（或直接輸入新的信箱地址）`;
+      replyForUser(event.replyToken, userId, boundProfile, msg);
+      return;
+    } else {
+      // 尚未綁定過，引導輸入姓名與 Email
+      const promptMsg = `📝【教師身分綁定】\n` +
+                        `您好 ${rawSenderName} 老師！請依照以下格式回覆您的姓名與公務 Email：\n\n` +
+                        `👉 範例：\n` +
+                        `綁定 王大明 daming@school.tp.edu.tw\n\n` +
+                        `（系統將自動在 Teacher_List 名冊中連結您的身分與 LINE 帳號！）`;
+      replyForUser(event.replyToken, userId, boundProfile, promptMsg);
       return;
     }
-
-    // 含有 Email，執行綁定邏輯
-    const extractedEmail = emailMatch[0].trim();
-    // 移除「綁定」字樣與 Email，剩下的文字作為姓名
-    let extractedName = text.replace(extractedEmail, '').replace(/綁定|老師|主任|組長|：|:/g, '').trim();
-    if (!extractedName) extractedName = rawSenderName; // 若未填姓名則暫用 LINE 暱稱
-
-    const bindResult = bindTeacherProfile(teacherSheet, userId, rawSenderName, extractedName, extractedEmail);
-    replyWithMenu(event.replyToken, bindResult);
-    return;
   }
 
-  // 2. 查詢自己的 LINE User ID
+  // ----------------------------------------------------
+  // 2. 收到 Email 格式輸入 (處理初次綁定 或 修改舊信箱)
+  // ----------------------------------------------------
+  if (emailMatch) {
+    const newEmail = emailMatch[0].trim();
+
+    if (boundProfile) {
+      // 💡 老師已綁定過，這次輸入是要「修改舊信箱」
+      const oldEmail = boundProfile.email;
+      teacherSheet.getRange(boundProfile.rowIndex, 2).setValue(newEmail);
+      teacherSheet.getRange(boundProfile.rowIndex, 3).setValue(true);
+      teacherSheet.getRange(boundProfile.rowIndex, 8).setValue(Utilities.formatDate(new Date(), 'GMT+8', 'yyyy-MM-dd HH:mm:ss'));
+
+      notifyAdmin(`📢 同仁變更信箱：【${boundProfile.name}】已將通知信箱更新！\n舊信箱：${oldEmail}\n新信箱：${newEmail}`);
+
+      const successMsg = `🎉【通知信箱已成功修改！】\n\n` +
+                         `👤 教師姓名：${boundProfile.name} 老師\n` +
+                         `📫 舊通知信箱：${oldEmail}\n` +
+                         `📧 新通知信箱 (已更新)：\n  👉 ${newEmail}\n\n` +
+                         `✅ 未來每日 12:00 與 16:00 的公務半日整理將準時寄送至您的「新信箱」！`;
+      
+      const updatedProfile = findTeacherProfileByUid(teacherSheet, userId);
+      replyForUser(event.replyToken, userId, updatedProfile, successMsg);
+      return;
+    } else {
+      // 尚未綁定過，執行初次綁定
+      let extractedName = text.replace(newEmail, '').replace(/綁定|修改信箱|修改email|老師|主任|組長|：|:/g, '').trim();
+      if (!extractedName) extractedName = rawSenderName;
+
+      const bindResult = bindTeacherProfile(teacherSheet, userId, rawSenderName, extractedName, newEmail);
+      const updatedProfile = findTeacherProfileByUid(teacherSheet, userId);
+      replyForUser(event.replyToken, userId, updatedProfile, bindResult);
+      return;
+    }
+  }
+
+  // ----------------------------------------------------
+  // 3. 查詢個人 LINE UID
+  // ----------------------------------------------------
   if (textLower === '我的id' || textLower === 'id' || textLower === '!id') {
-    replyWithMenu(event.replyToken, `🆔 您的 LINE User ID 為：\n${userId}\n\nLINE 暱稱：${rawSenderName}`);
+    replyForUser(event.replyToken, userId, boundProfile, `🆔 您的 LINE User ID 為：\n${userId}\n\nLINE 暱稱：${rawSenderName}`);
     return;
   }
 
-  // 3. 指令選單 / 說明
-  if (textLower === '選單' || textLower === 'menu' || textLower === '!menu' || textLower === '說明' || textLower === '!help') {
-    sendAdminMenuCard(event.replyToken, rawSenderName);
-    return;
-  }
-
-  // 4. 管理員指令：!status
+  // ----------------------------------------------------
+  // 4. 管理員專屬指令區 (非管理員一律阻擋，不顯示功能)
+  // ----------------------------------------------------
   if (textLower === '!status' || textLower === '查詢狀態' || textLower === '狀態') {
-    if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-      replyWithMenu(event.replyToken, '❌ 抱歉，此功能為系統管理員專用指令。');
-    } else {
-      const pendingCount = getPendingMessageCount(rawSheet);
-      replyWithMenu(event.replyToken, `📊 系統狀態報告：\n目前試算表中待彙整派報的群組公務訊息共有 【${pendingCount}】 筆。\n\n💡 提示：若該時段待處理為 0 筆，系統將自動跳過不寄信。`);
+    if (!isAdmin) {
+      replyForUser(event.replyToken, userId, boundProfile, '❌ 抱歉，此功能為系統管理員專屬權限。一般同仁僅開放「身分綁定 / 修改信箱」功能。');
+      return;
     }
+    const pendingCount = getPendingMessageCount(rawSheet);
+    replyForUser(event.replyToken, userId, boundProfile, `📊 系統狀態報告：\n目前試算表中待彙整派報的群組公務訊息共有 【${pendingCount}】 筆。\n\n💡 提示：若該時段待處理為 0 筆，系統將自動跳過不寄信。`);
     return;
   }
 
-  // 5. 管理員指令：!members
   if (textLower === '!members' || textLower === '人員名冊' || textLower === '名冊') {
-    if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-      replyWithMenu(event.replyToken, '❌ 抱歉，此功能為系統管理員專用指令。');
-    } else {
-      const memberSummary = getMemberDirectorySummary(memberSheet);
-      replyWithMenu(event.replyToken, memberSummary);
+    if (!isAdmin) {
+      replyForUser(event.replyToken, userId, boundProfile, '❌ 抱歉，此功能為系統管理員專屬權限。');
+      return;
     }
+    const memberSummary = getMemberDirectorySummary(memberSheet);
+    replyForUser(event.replyToken, userId, boundProfile, memberSummary);
     return;
   }
 
-  // 6. 管理員指令：!send
   if (textLower === '!send' || textLower === '立即派報' || textLower === '手動派報') {
-    if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-      replyWithMenu(event.replyToken, '❌ 抱歉，此功能為系統管理員專用指令。');
+    if (!isAdmin) {
+      replyForUser(event.replyToken, userId, boundProfile, '❌ 抱歉，此功能為系統管理員專屬權限。');
+      return;
+    }
+    const pendingCount = getPendingMessageCount(rawSheet);
+    if (pendingCount === 0) {
+      replyForUser(event.replyToken, userId, boundProfile, 'ℹ️ 目前群組【無任何待處理新訊息】，依系統規則本次不寄發信件。');
     } else {
-      const pendingCount = getPendingMessageCount(rawSheet);
-      if (pendingCount === 0) {
-        replyWithMenu(event.replyToken, 'ℹ️ 目前群組【無任何待處理新訊息】，依系統規則本次不寄發信件。');
-      } else {
-        replyWithMenu(event.replyToken, `🚀 已收到管理員指令！偵測到有 ${pendingCount} 筆待處理群組訊息，系統正在彙整派發中...`);
-        processAndSendDigest('管理員手動即時觸發');
-      }
+      replyForUser(event.replyToken, userId, boundProfile, `🚀 已收到管理員指令！偵測到有 ${pendingCount} 筆待處理群組訊息，系統正在彙整派發中...`);
+      processAndSendDigest('管理員手動即時觸發');
     }
     return;
   }
 
-  // 7. 管理員指令：!test
   if (textLower === '!test' || textLower === '測試ai' || textLower === '測試') {
-    if (ADMIN_USER_ID && userId !== ADMIN_USER_ID) {
-      replyWithMenu(event.replyToken, '❌ 抱歉，此功能為系統管理員專用指令。');
-    } else {
-      replyWithMenu(event.replyToken, '🧪 正在連線測試 Gemini AI 模型中，請稍候約 1~3 秒...');
-      const testResult = testGeminiApi();
-      notifyAdmin(testResult);
+    if (!isAdmin) {
+      replyForUser(event.replyToken, userId, boundProfile, '❌ 抱歉，此功能為系統管理員專屬權限。');
+      return;
     }
+    replyForUser(event.replyToken, userId, boundProfile, '🧪 正在連線測試 Gemini AI 模型中，請稍候約 1~3 秒...');
+    const testResult = testGeminiApi();
+    notifyAdmin(testResult);
     return;
   }
 
-  // 預設回傳引導選單
-  sendAdminMenuCard(event.replyToken, rawSenderName);
+  // ----------------------------------------------------
+  // 5. 預設導引面板 (依管理員 / 一般老師顯示不同內容)
+  // ----------------------------------------------------
+  sendAppropriateMenu(event.replyToken, userId, rawSenderName, boundProfile);
 }
 
-/**
- * 🔗 核心功能：在 Teacher_List 比對同仁姓名與 Email，連帶記錄 UID、暱稱與綁定時間
- */
+// ==========================
+// 6. 身分綁定核心資料庫處理函式
+// ==========================
+function findTeacherProfileByUid(sheet, userId) {
+  if (!sheet || !userId) return null;
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][5] === userId) {
+      return {
+        rowIndex: i + 1,
+        name: data[i][0],
+        email: data[i][1],
+        isActive: (data[i][2] === true || data[i][2] === 'TRUE'),
+        department: data[i][3] || '一般科別',
+        notes: data[i][4],
+        userId: data[i][5],
+        displayName: data[i][6],
+        boundAt: data[i][7]
+      };
+    }
+  }
+  return null;
+}
+
 function bindTeacherProfile(sheet, userId, displayName, nameInput, emailInput) {
   if (!sheet) return '⚠️ 系統尚未建立 Teacher_List 工作表，請聯繫管理員！';
 
@@ -379,14 +429,12 @@ function bindTeacherProfile(sheet, userId, displayName, nameInput, emailInput) {
   let department = '';
   let officialName = nameInput;
 
-  // 清理比對用字串 (去除空格與「老師」後綴)
   const cleanInputName = nameInput.replace(/\s+|老師/g, '').toLowerCase();
 
   for (let i = 1; i < data.length; i++) {
     const sheetName = String(data[i][0] || '').replace(/\s+|老師/g, '').toLowerCase();
     const sheetEmail = String(data[i][1] || '').trim().toLowerCase();
 
-    // 優先比對姓名或 Email
     if ((cleanInputName && sheetName && (sheetName.includes(cleanInputName) || cleanInputName.includes(sheetName))) ||
         (sheetEmail && sheetEmail === emailInput.toLowerCase())) {
       matchedRow = i + 1;
@@ -399,14 +447,13 @@ function bindTeacherProfile(sheet, userId, displayName, nameInput, emailInput) {
   const timeStr = Utilities.formatDate(new Date(), 'GMT+8', 'yyyy-MM-dd HH:mm:ss');
 
   if (matchedRow > 0) {
-    // 找到該同仁：更新 Email、啟用通知、回填 UID、暱稱與綁定時間
-    sheet.getRange(matchedRow, 2).setValue(emailInput); // B欄: Email
-    sheet.getRange(matchedRow, 3).setValue(true);       // C欄: 接收通知 = TRUE
-    sheet.getRange(matchedRow, 6).setValue(userId);     // F欄: LINE UID
-    sheet.getRange(matchedRow, 7).setValue(displayName);// G欄: LINE 暱稱
-    sheet.getRange(matchedRow, 8).setValue(timeStr);    // H欄: 綁定時間
+    sheet.getRange(matchedRow, 2).setValue(emailInput);
+    sheet.getRange(matchedRow, 3).setValue(true);
+    sheet.getRange(matchedRow, 6).setValue(userId);
+    sheet.getRange(matchedRow, 7).setValue(displayName);
+    sheet.getRange(matchedRow, 8).setValue(timeStr);
 
-    notifyAdmin(`📢 同仁身分綁定通知：【${officialName}】已完成 LINE 綁定！\nEmail：${emailInput}\nLINE 暱稱：${displayName}`);
+    notifyAdmin(`📢 同仁身分綁定成功：【${officialName}】已完成 LINE 綁定！\nEmail：${emailInput}\nLINE 暱稱：${displayName}`);
 
     return `🎉【身分綁定成功！】\n\n` +
            `👤 教師姓名：${officialName}\n` +
@@ -414,9 +461,9 @@ function bindTeacherProfile(sheet, userId, displayName, nameInput, emailInput) {
            `🏢 所屬處室/科別：${department}\n` +
            `📱 綁定 LINE 暱稱：${displayName}\n\n` +
            `✅ 系統已將您的 LINE 與教師通訊錄成功串接！\n` +
-           `每日 12:00 與 16:00 的公務半日整理將準時寄送至您的 Email。`;
+           `每日 12:00 與 16:00 的公務半日整理將準時寄送至您的 Email。\n\n` +
+           `💡 若未來欲更換信箱，隨時在此點選「修改Email」即可！`;
   } else {
-    // 名冊未建檔：自動追加一列新同仁資料
     sheet.appendRow([
       nameInput,
       emailInput,
@@ -438,23 +485,25 @@ function bindTeacherProfile(sheet, userId, displayName, nameInput, emailInput) {
   }
 }
 
-// 引導好友加入之歡迎詞
-function sendWelcomeAndBindingPrompt(replyToken, displayName) {
-  const welcomeText = `👋 您好 ${displayName} 老師！歡迎加入「竹林召集人通報秘書」！
-
-本系統每日於 12:00 與 16:00 自動彙整召集人群組之重要行政公文、段考範圍與活動調移，派送至全體同仁信箱。
-
-📝【請進行身分綁定】：
-請直接依照下方範例格式回覆您的「姓名」與「公務Email」：
-👉 範例：綁定 王大明 daming@school.tp.edu.tw
-
-點擊下方「📝 身分綁定」即可開始！`;
-
-  replyWithMenu(replyToken, welcomeText);
+function sendWelcomeAndBindingPrompt(replyToken, displayName, boundProfile, userId) {
+  if (boundProfile) {
+    const welcomeBackText = `👋 您好 ${boundProfile.name} 老師！歡迎回到「竹林召集人通報秘書」！\n\n` +
+                            `您目前已綁定通知信箱：\n👉 ${boundProfile.email}\n\n` +
+                            `若需修改接收信箱，請直接點擊下方【✏️ 修改Email】！`;
+    replyForUser(replyToken, userId, boundProfile, welcomeBackText);
+  } else {
+    const welcomeText = `👋 您好 ${displayName} 老師！歡迎加入「竹林召集人通報秘書」！\n\n` +
+                        `本系統每日於 12:00 與 16:00 自動彙整召集人群組之重要行政公文、段考範圍與活動調移，派送至全體同仁信箱。\n\n` +
+                        `📝【請先進行身分綁定】：\n` +
+                        `請直接依照下方範例格式回覆您的「姓名」與「公務Email」：\n` +
+                        `👉 範例：綁定 王大明 daming@school.tp.edu.tw\n\n` +
+                        `點擊下方「📝 身分綁定」即可開始！`;
+    replyForUser(replyToken, userId, boundProfile, welcomeText);
+  }
 }
 
 // ==========================
-// 6. 定時彙整與 Email 派報 (12:00 / 16:00 觸發)
+// 7. 定時彙整與 Email 派報 (12:00 / 16:00 觸發)
 // ==========================
 function runDigest1200() {
   processAndSendDigest('中午 12:00');
@@ -564,7 +613,7 @@ function processAndSendDigest(timeSlotLabel) {
 }
 
 // ==========================
-// 7. Gemini API 智慧分類與單位身分發文
+// 8. Gemini API 智慧分類與單位身分發文
 // ==========================
 function analyzeAndSummarizeWithGemini(rows) {
   const apiKey = getActiveGeminiApiKey();
@@ -574,7 +623,7 @@ function analyzeAndSummarizeWithGemini(rows) {
 你是一位專業的高中行政教務秘書。以下是學校「召集人群組」今日由各處室幹事、主任或召集人發出的訊息清單：
 ${JSON.stringify(rows.map(r => ({
   sender: r.sender,
-  department: r.department || "未指定處室",
+  department: r.department || '未指定處室',
   type: r.type,
   content: r.content,
   time: Utilities.formatDate(new Date(r.timestamp), 'GMT+8', 'HH:mm')
@@ -610,7 +659,7 @@ ${JSON.stringify(rows.map(r => ({
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`;
       const payload = {
         contents: [{ parts: [{ text: promptText }] }],
-        generationConfig: { responseMimeType: "application/json" }
+        generationConfig: { responseMimeType: 'application/json' }
       };
 
       const response = UrlFetchApp.fetch(url, {
@@ -660,7 +709,7 @@ function fallbackRuleFilter(rows) {
 }
 
 // ==========================
-// 8. 發言人名冊管理 (Member_Directory)
+// 9. 發言人名冊管理 (Member_Directory)
 // ==========================
 function registerOrUpdateMember(sheet, userId, displayName, timestamp) {
   if (!sheet) return { department: '', title: '', officialSender: displayName };
@@ -726,22 +775,37 @@ function getMemberDirectorySummary(sheet) {
 }
 
 // ==========================
-// 9. LINE 快捷按鈕與面板
+// 10. 權限隔離選單與 Quick Reply
 // ==========================
-function getQuickReplyItems() {
-  return {
-    items: [
-      { type: "action", action: { type: "message", label: "📝 身分綁定", text: "身分綁定" } },
-      { type: "action", action: { type: "message", label: "📊 查詢狀態", text: "!status" } },
-      { type: "action", action: { type: "message", label: "👥 人員名冊", text: "!members" } },
-      { type: "action", action: { type: "message", label: "🚀 立即派報", text: "!send" } },
-      { type: "action", action: { type: "message", label: "🧪 測試AI", text: "!test" } },
-      { type: "action", action: { type: "message", label: "🆔 我的ID", text: "!id" } }
-    ]
-  };
+function getQuickReplyForUser(userId, boundProfile) {
+  const isAdmin = isUserAdmin(userId);
+
+  if (isAdmin) {
+    // 👑 管理員：開啟所有選單功能
+    return {
+      items: [
+        { type: 'action', action: { type: 'message', label: '📊 查詢狀態', text: '!status' } },
+        { type: 'action', action: { type: 'message', label: '👥 人員名冊', text: '!members' } },
+        { type: 'action', action: { type: 'message', label: '🚀 立即派報', text: '!send' } },
+        { type: 'action', action: { type: 'message', label: '🧪 測試AI', text: '!test' } },
+        { type: 'action', action: { type: 'message', label: boundProfile ? '✏️ 修改Email' : '📝 身分綁定', text: boundProfile ? '修改Email' : '身分綁定' } },
+        { type: 'action', action: { type: 'message', label: '🆔 我的ID', text: '!id' } }
+      ]
+    };
+  } else {
+    // 👤 一般老師：嚴格只開放「身分綁定 / 修改Email」與「查詢ID」
+    const bindLabel = boundProfile ? '✏️ 修改Email' : '📝 身分綁定';
+    const bindText = boundProfile ? '修改Email' : '身分綁定';
+    return {
+      items: [
+        { type: 'action', action: { type: 'message', label: bindLabel, text: bindText } },
+        { type: 'action', action: { type: 'message', label: '🆔 我的ID', text: '!id' } }
+      ]
+    };
+  }
 }
 
-function replyWithMenu(replyToken, text) {
+function replyForUser(replyToken, userId, boundProfile, text) {
   if (!LINE_CHANNEL_ACCESS_TOKEN || !replyToken) return;
   try {
     const url = 'https://api.line.me/v2/bot/message/reply';
@@ -756,39 +820,53 @@ function replyWithMenu(replyToken, text) {
         messages: [{
           type: 'text',
           text: text,
-          quickReply: getQuickReplyItems()
+          quickReply: getQuickReplyForUser(userId, boundProfile)
         }]
       }),
       muteHttpExceptions: true
     });
   } catch (e) {
-    console.error('replyWithMenu 失敗: ' + e.message);
+    console.error('replyForUser 失敗: ' + e.message);
   }
 }
 
-function sendAdminMenuCard(replyToken, userName) {
-  const menuText = `🛠️【召集人通報秘書・同仁服務面板】
-您好 ${userName} 老師！請直接點擊下方快捷按鈕操作：
+function sendAppropriateMenu(replyToken, userId, rawSenderName, boundProfile) {
+  const isAdmin = isUserAdmin(userId);
 
-📝 身分綁定 (輸入：綁定 姓名 信箱)
-  將您的 LINE 帳號與學校教師通訊錄連結，準時接收半日公務通報
+  if (isAdmin) {
+    const adminMenuText = `🛠️【召集人通報秘書・管理員控制台】\n` +
+                          `您好 管理員！請直接點擊下方快捷按鈕操作：\n\n` +
+                          `📊 狀態查詢 (!status)：查看目前待派報訊息筆數\n` +
+                          `👥 人員名冊 (!members)：查看群組發言人處室設定\n` +
+                          `🚀 立即派報 (!send)：手動執行半日彙整並寄發 Email\n` +
+                          `🧪 測試 AI (!test)：測試 Gemini 模型連線\n` +
+                          `${boundProfile ? '✏️ 修改Email：變更您的個人接收信箱' : '📝 身分綁定：綁定您的個人教師資料'}\n` +
+                          `🆔 我的ID (!id)：查詢您的 33 碼 LINE User ID`;
 
-📊 狀態查詢 (管理員指令 !status)
-  查看目前累積待派報之公務訊息筆數
+    replyForUser(replyToken, userId, boundProfile, adminMenuText);
+  } else {
+    let teacherMenuText = '';
+    if (boundProfile) {
+      teacherMenuText = `🏫【竹林召集人通報秘書・同仁專區】\n` +
+                        `您好 ${boundProfile.name} 老師！\n\n` +
+                        `✅ 您目前已完成身分綁定：\n` +
+                        `• 通知信箱：${boundProfile.email}\n` +
+                        `• 所屬處室：${boundProfile.department}\n\n` +
+                        `💡 若需更換公務通知信箱，請點擊下方【✏️ 修改Email】！\n` +
+                        `（每日 12:00 與 16:00 之半日公務通報將準時寄至您的信箱）`;
+    } else {
+      teacherMenuText = `🏫【竹林召集人通報秘書・同仁專區】\n` +
+                        `您好 ${rawSenderName} 老師！\n\n` +
+                        `本機器人專門整理「召集人群組」之公務通知，並定時發送至同仁信箱。\n` +
+                        `📝 您目前尚未綁定教師信箱，請點擊下方【📝 身分綁定】依引導設定！`;
+    }
 
-👥 人員名冊 (管理員指令 !members)
-  查看群組發言人與單位綁定狀況
-
-🚀 立即派報 (管理員指令 !send)
-  立即手動執行半日彙整並以處室名義發送 Email
-
-🔒 安全提示：個人私訊傳送的內容絕不會被公開發送，請安心使用！`;
-
-  replyWithMenu(replyToken, menuText);
+    replyForUser(replyToken, userId, boundProfile, teacherMenuText);
+  }
 }
 
 // ==========================
-// 10. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
+// 11. 輔助函式 (Drive存檔、LINE Reply、HTML產生)
 // ==========================
 function saveLineContentToDrive(messageId, fileName) {
   try {
@@ -819,8 +897,7 @@ function notifyAdmin(message) {
         to: ADMIN_USER_ID,
         messages: [{
           type: 'text',
-          text: message,
-          quickReply: getQuickReplyItems()
+          text: message
         }]
       }),
       muteHttpExceptions: true
