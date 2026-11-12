@@ -267,3 +267,27 @@ linebot-school-notifier/
    - 系統會先將目前審核通過的 HTML 信件**單獨寄一封至管理員的信箱**，讓您在手機 Gmail 檢查實際排版效果。
 4. **點擊【🚀 確認寄出】（或輸入 `!confirm`）**：
    - 確認無誤後，正式將審核通過的項目發信給全體老師！
+
+---
+
+## 🛡️ 郵件亂碼與問號符號（）防護設計
+
+在部分郵件用戶端（如 Windows Outlook、特定公務信箱或舊版 Webmail）中，4 位元組 UTF-8 表情符號（Emoji，如 🏫、💡、📎、📢）容易因為字元集解析錯誤而退化顯示為黑色菱形問號（``）。
+
+本系統已採用全面防護機制解決此問題：
+1. **標準 HTML5 宣告與 UTF-8 強制編碼標頭**：
+   ```html
+   <!DOCTYPE html>
+   <html lang="zh-TW">
+   <head>
+     <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   ...
+   ```
+2. **純 CSS 精美圓角標籤替代 Raw Emoji**：
+   - 主旨與標題全面改用優雅的 CSS 徽章（如 `[竹林召集人]`、`[重點摘要]`、`[附件公告]`、`[全校公務]`）。
+   - 採用標準通用 Unicode 符號（如 `【`、`】`、`•`、`｜`、`✦`），確保在跨平台（iOS, Android, Windows, Mac, Webmail）100% 正常顯示零亂碼。
+3. **雙格式備援（HTML + 純文字 Fallback）**：
+   - 透過 `GmailApp.sendEmail` 同步傳送標準純文字版本，讓不支援 HTML 渲染的終端也能清晰閱讀。
+
